@@ -1,4 +1,4 @@
-﻿@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap');
 @import "tailwindcss";
 
 @theme {
@@ -1238,4 +1238,291 @@ textarea {
     margin-bottom: 12px !important;
     pointer-events: auto;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   DATABASE VERIFICATION PANEL
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.db-verify-panel {
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fff;
+  margin-bottom: 2px;
+}
+
+.db-verify-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.06) 0%, transparent 100%);
+  border-bottom: 1px solid rgba(37, 99, 235, 0.12);
+  font-size: 11px;
+  font-weight: 700;
+  color: #1e40af;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.db-verify-badge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.db-verify-badge.all-match {
+  background: rgba(22, 163, 74, 0.12);
+  color: #16a34a;
+}
+
+.db-verify-badge.partial-match {
+  background: rgba(217, 119, 6, 0.12);
+  color: #d97706;
+}
+
+.db-verify-badge.no-match {
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+}
+
+.db-verify-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10.5px;
+}
+
+.db-verify-table thead tr {
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.db-verify-table thead th {
+  padding: 8px 12px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.db-verify-table tbody tr {
+  border-bottom: 1px solid rgba(226, 232, 240, 0.6);
+  transition: background 0.12s;
+}
+
+.db-verify-table tbody tr:last-child {
+  border-bottom: none;
+}
+
+.db-verify-table tbody tr:hover {
+  background: #f8fafc;
+}
+
+.db-verify-table td {
+  padding: 7px 12px;
+  vertical-align: top;
+}
+
+.field-name {
+  font-weight: 600;
+  color: #374151;
+  white-space: nowrap;
+  font-size: 10px;
+}
+
+.field-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  max-width: 130px;
+  word-break: break-word;
+}
+
+.field-value.extracted {
+  color: #1e40af;
+}
+
+.field-value.stored {
+  color: #374151;
+}
+
+.field-empty {
+  color: #9ca3af;
+  font-style: italic;
+  font-size: 9.5px;
+}
+
+.field-status {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+}
+
+.match-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 99px;
+  font-size: 9.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.match-badge.match {
+  background: rgba(22, 163, 74, 0.12);
+  color: #16a34a;
+}
+
+.match-badge.mismatch {
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+}
+
+.match-badge.neutral {
+  background: #f1f5f9;
+  color: #94a3b8;
+}
+
+.field-note {
+  font-size: 9px;
+  color: #94a3b8;
+  font-style: italic;
+  line-height: 1.35;
+  max-width: 150px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   BARCODE STATUS CARD
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.barcode-status-card {
+  border-radius: 10px;
+  padding: 11px 14px;
+  border: 1px solid;
+  font-size: 11px;
+}
+
+.barcode-status-card.neutral {
+  border-color: rgba(148, 163, 184, 0.3);
+  background: #f8fafc;
+}
+
+.barcode-status-card.success {
+  border-color: rgba(22, 163, 74, 0.25);
+  background: rgba(22, 163, 74, 0.04);
+}
+
+.barcode-status-card.danger {
+  border-color: rgba(220, 38, 38, 0.2);
+  background: rgba(220, 38, 38, 0.04);
+}
+
+.barcode-status-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+}
+
+.barcode-icon {
+  font-size: 13px;
+  letter-spacing: -2px;
+  color: #6b7280;
+}
+
+.barcode-status-header strong {
+  font-size: 11px;
+  font-weight: 700;
+  color: #374151;
+}
+
+.barcode-chip {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.chip-neutral { background: #e2e8f0; color: #64748b; }
+.chip-success { background: rgba(22, 163, 74, 0.12); color: #16a34a; }
+.chip-danger  { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
+
+.barcode-note {
+  margin: 0;
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.barcode-values {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+}
+
+.barcode-values span {
+  color: #9ca3af;
+  margin-right: 5px;
+}
+
+.barcode-values code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  background: #f1f5f9;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #334155;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   IMAGE ANALYSIS CARD
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.image-analysis-card {
+  border-radius: 10px;
+  padding: 11px 14px;
+  border: 1px solid;
+  font-size: 11px;
+}
+
+.image-analysis-card.good {
+  border-color: rgba(22, 163, 74, 0.2);
+  background: rgba(22, 163, 74, 0.03);
+}
+
+.image-analysis-card.warn {
+  border-color: rgba(217, 119, 6, 0.2);
+  background: rgba(217, 119, 6, 0.03);
+}
+
+.image-analysis-card.bad {
+  border-color: rgba(220, 38, 38, 0.18);
+  background: rgba(220, 38, 38, 0.03);
+}
+
+.image-anomaly-list {
+  margin: 5px 0 0;
+  padding: 0 0 0 14px;
+  list-style: disc;
+  font-size: 10px;
+  color: #6b7280;
+  line-height: 1.6;
+}
+
+.image-ok-note {
+  margin: 4px 0 0;
+  font-size: 10px;
+  color: #16a34a;
+  font-weight: 600;
 }

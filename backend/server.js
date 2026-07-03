@@ -38,7 +38,8 @@ await fastify.register(fastifyStatic, {
 const wsClients = new Map();
 const generateId = () => Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 
-// Zod validation schemas
+// ─── Zod validation schemas ───────────────────────────────────────────────────
+
 const registerSchema = z.object({
   email: z.string().email('Invalid email address'),
   password: z.string().min(6, 'Password must be at least 6 characters'),
@@ -56,7 +57,9 @@ const reportSchema = z.object({
   medicine_id: z.string().min(1, 'medicine_id is required'),
   batch_number: z.string().min(1, 'batch_number is required'),
   lat: z.number().optional(),
-  lng: z.number().optional()
+  lng: z.number().optional(),
+  notes: z.string().optional(),
+  scan_id: z.string().optional()
 });
 
 function validate(schema, data) {
@@ -86,7 +89,8 @@ async function optionalAuth(request) {
 
 await initDb();
 
-// WebSocket — fixed for @fastify/websocket v10 API
+// ─── WebSocket — real-time scan progress ──────────────────────────────────────
+
 fastify.register(async function (fastify) {
   fastify.get('/ws/scan', { websocket: true }, (socket, req) => {
     let currentScanId = null;
@@ -117,7 +121,7 @@ fastify.register(async function (fastify) {
   });
 });
 
-// ──────────────────────────────────────── AUTH ────────────────────────────────────────
+// ─── AUTH ─────────────────────────────────────────────────────────────────────
 
 fastify.post('/api/v1/auth/register', async (request, reply) => {
   const parsed = validate(registerSchema, request.body);
@@ -129,15 +133,14 @@ fastify.post('/api/v1/auth/register', async (request, reply) => {
 
   const id = 'usr-' + generateId();
   const hash = bcrypt.hashSync(password, 10);
-  const verified = ['consumer', 'healthcare_worker'].includes(role) ? 1 : 1;
 
   await query.run(
     'INSERT INTO users (id, email, password_hash, role, verified, license_number, pin_code) VALUES (?,?,?,?,?,?,?)',
-    [id, email, hash, role, verified, license_number || null, pin_code || null]
+    [id, email, hash, role, 1, license_number || null, pin_code || null]
   );
 
-  const token = fastify.jwt.sign({ id, email, role, verified });
-  return { token, user: { id, email, role, verified } };
+  const token = fastify.jwt.sign({ id, email, role, verified: 1 });
+  return { token, user: { id, email, role, verified: 1 } };
 });
 
 fastify.post('/api/v1/auth/login', async (request, reply) => {
@@ -155,41 +158,106 @@ fastify.post('/api/v1/auth/login', async (request, reply) => {
 });
 
 fastify.get('/api/v1/auth/me', { preHandler: authenticate }, async (request) => {
-  return await query.get('SELECT id,email,role,verified,license_number,pin_code,language FROM users WHERE id=?', [request.user.id]);
+  return await query.get(
+    'SELECT id,email,role,verified,license_number,pin_code,language FROM users WHERE id=?',
+    [request.user.id]
+  );
 });
 
-// ──────────────────────────────────────── MEDICINES ────────────────────────────────────────
+// ─── MEDICINES ────────────────────────────────────────────────────────────────
 
 fastify.get('/api/v1/medicines/search', async (request) => {
   const q = request.query.q;
   if (!q) return [];
   const results = await query.all(
-    `SELECT id, name, generic_name, manufacturer_name, composition, expected_colors, approved_batch_format 
+    `SELECT id, name, generic_name, manufacturer_name, composition, expected_colors, approved_batch_format, barcode_required
      FROM medicines WHERE name LIKE ? OR generic_name LIKE ? OR manufacturer_name LIKE ? OR composition LIKE ? LIMIT 20`,
     [`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`]
   );
-  return results.map(r => ({ ...r, composition: JSON.parse(r.composition), expected_colors: JSON.parse(r.expected_colors) }));
+  return results.map(r => ({
+    ...r,
+    composition: JSON.parse(r.composition),
+    expected_colors: JSON.parse(r.expected_colors)
+  }));
 });
 
 fastify.get('/api/v1/medicines/:id', async (request, reply) => {
   const row = await query.get('SELECT * FROM medicines WHERE id = ?', [request.params.id]);
   if (!row) return reply.status(404).send({ error: 'Not found' });
-  return { ...row, composition: JSON.parse(row.composition), expected_colors: JSON.parse(row.expected_colors) };
+  return {
+    ...row,
+    composition: JSON.parse(row.composition),
+    expected_colors: JSON.parse(row.expected_colors)
+  };
 });
 
-// NEW: Medicine substitution suggestion — when a scanned medicine is flagged, find verified alternatives
+// List batches for a medicine
+fastify.get('/api/v1/medicines/:id/batches', async (request, reply) => {
+  const med = await query.get('SELECT id FROM medicines WHERE id = ?', [request.params.id]);
+  if (!med) return reply.status(404).send({ error: 'Medicine not found' });
+  const batches = await query.all(
+    `SELECT * FROM medicine_batches WHERE medicine_id = ? ORDER BY created_at DESC`,
+    [request.params.id]
+  );
+  return batches;
+});
+
+// Medicine substitution suggestion
 fastify.get('/api/v1/medicines/:id/alternatives', async (request) => {
   const med = await query.get('SELECT generic_name, composition FROM medicines WHERE id = ?', [request.params.id]);
   if (!med) return [];
   const alts = await query.all(
-    `SELECT id, name, generic_name, manufacturer_name, composition, expected_colors 
+    `SELECT id, name, generic_name, manufacturer_name, composition, expected_colors
      FROM medicines WHERE generic_name = ? AND id != ? LIMIT 10`,
     [med.generic_name, request.params.id]
   );
-  return alts.map(r => ({ ...r, composition: JSON.parse(r.composition), expected_colors: JSON.parse(r.expected_colors) }));
+  return alts.map(r => ({
+    ...r,
+    composition: JSON.parse(r.composition),
+    expected_colors: JSON.parse(r.expected_colors)
+  }));
 });
 
-// ──────────────────────────────────────── SCANS ────────────────────────────────────────
+// ─── BATCH LOOKUP ─────────────────────────────────────────────────────────────
+
+// Look up a batch by batch_number (optionally scoped to medicine_id)
+fastify.get('/api/v1/batches/lookup', async (request, reply) => {
+  const { batch_number, medicine_id } = request.query;
+  if (!batch_number) return reply.status(400).send({ error: 'batch_number query param required' });
+
+  let row;
+  if (medicine_id) {
+    row = await query.get(
+      `SELECT mb.*, m.name as medicine_name, m.generic_name, m.manufacturer_name
+       FROM medicine_batches mb JOIN medicines m ON mb.medicine_id = m.id
+       WHERE mb.batch_number = ? AND mb.medicine_id = ?`,
+      [batch_number, medicine_id]
+    );
+  } else {
+    row = await query.get(
+      `SELECT mb.*, m.name as medicine_name, m.generic_name, m.manufacturer_name
+       FROM medicine_batches mb JOIN medicines m ON mb.medicine_id = m.id
+       WHERE mb.batch_number = ?`,
+      [batch_number]
+    );
+  }
+
+  if (!row) return reply.status(404).send({ found: false, error: 'Batch not found in genuine batch database' });
+  return { found: true, batch: row };
+});
+
+fastify.get('/api/v1/batches/:id', async (request, reply) => {
+  const row = await query.get(
+    `SELECT mb.*, m.name as medicine_name, m.generic_name, m.manufacturer_name
+     FROM medicine_batches mb JOIN medicines m ON mb.medicine_id = m.id
+     WHERE mb.id = ?`,
+    [request.params.id]
+  );
+  if (!row) return reply.status(404).send({ error: 'Batch not found' });
+  return row;
+});
+
+// ─── SCANS ────────────────────────────────────────────────────────────────────
 
 fastify.post('/api/v1/scans', { preHandler: optionalAuth }, async (request, reply) => {
   const data = await request.file();
@@ -279,59 +347,126 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
     const verdict = result.authenticity_score >= 80 ? 'verified'
       : result.authenticity_score >= 55 ? 'caution' : 'high_risk';
 
+    // Persist scan result with all new fields
     await query.run(
-      `UPDATE scans SET medicine_id=?, authenticity_score=?, verdict=?,
-       ocr_extracted=?, anomalies=?, signal_breakdown=?, scanned_at=CURRENT_TIMESTAMP WHERE id=?`,
-      [result.medicine_id, result.authenticity_score, verdict,
-       JSON.stringify(result.ocr_extracted), JSON.stringify(result.anomalies),
-       JSON.stringify(result.signal_breakdown), scanId]
+      `UPDATE scans SET
+        medicine_id=?, batch_id=?, authenticity_score=?, verdict=?,
+        ocr_extracted=?, db_match_results=?, image_analysis=?, barcode_status=?,
+        anomalies=?, signal_breakdown=?, scanned_at=CURRENT_TIMESTAMP
+       WHERE id=?`,
+      [
+        result.medicine_id,
+        result.batch_id || null,
+        result.authenticity_score,
+        verdict,
+        JSON.stringify(result.ocr_extracted),
+        JSON.stringify(result.db_match_results || {}),
+        JSON.stringify(result.image_analysis || {}),
+        JSON.stringify(result.barcode_status || {}),
+        JSON.stringify(result.anomalies),
+        JSON.stringify(result.signal_breakdown),
+        scanId
+      ]
     );
 
+    // Auto-create counterfeit alert for high_risk scans
     if (verdict === 'high_risk' && result.medicine_id) {
       const batch = result.ocr_extracted?.batch_number || 'UNKNOWN';
-      const existing = await query.get('SELECT * FROM alerts WHERE medicine_id=? AND batch_number=?', [result.medicine_id, batch]);
+      const existing = await query.get(
+        'SELECT * FROM alerts WHERE medicine_id=? AND batch_number=?',
+        [result.medicine_id, batch]
+      );
       if (existing) {
         const newCount = existing.report_count + 1;
-        await query.run('UPDATE alerts SET report_count=?, severity=?, last_updated=CURRENT_TIMESTAMP WHERE id=?',
-          [newCount, newCount >= 3 ? 'high' : 'caution', existing.id]);
+        await query.run(
+          'UPDATE alerts SET report_count=?, severity=?, last_updated=CURRENT_TIMESTAMP WHERE id=?',
+          [newCount, newCount >= 3 ? 'high' : 'caution', existing.id]
+        );
       } else {
-        await query.run('INSERT INTO alerts (id,medicine_id,batch_number,report_count,lat,lng,severity) VALUES (?,?,?,1,?,?,?)',
-          ['alt-' + generateId(), result.medicine_id, batch, lat, lng, 'caution']);
+        await query.run(
+          'INSERT INTO alerts (id,medicine_id,batch_number,report_count,lat,lng,severity) VALUES (?,?,?,1,?,?,?)',
+          ['alt-' + generateId(), result.medicine_id, batch, lat, lng, 'caution']
+        );
       }
     }
 
     sendWs(scanId, {
-      status: 'completed', scanId,
-      data: { id: scanId, image_url: relativeUrl, authenticity_score: result.authenticity_score,
-        verdict, ocr_extracted: result.ocr_extracted, anomalies: result.anomalies,
-        signal_breakdown: result.signal_breakdown, medicine_id: result.medicine_id,
-        medicine_name: result.ocr_extracted?.name, lat, lng }
+      status: 'completed',
+      scanId,
+      data: {
+        id: scanId,
+        image_url: relativeUrl,
+        authenticity_score: result.authenticity_score,
+        verdict,
+        ocr_extracted: result.ocr_extracted,
+        db_match_results: result.db_match_results,
+        image_analysis: result.image_analysis,
+        barcode_status: result.barcode_status,
+        anomalies: result.anomalies,
+        signal_breakdown: result.signal_breakdown,
+        medicine_id: result.medicine_id,
+        batch_id: result.batch_id,
+        medicine_name: result.ocr_extracted?.name,
+        lat,
+        lng
+      }
     });
 
   } catch (err) {
     console.error(`ML pipeline error for ${scanId}:`, err.message);
+    const fallbackBreakdown = {
+      batch_number: null, manufacturing_date: null, expiry_date: null,
+      manufacturer: null, medicine_name: null, image_analysis: 50, barcode: null
+    };
     await query.run(
       `UPDATE scans SET verdict='caution', authenticity_score=50,
        ocr_extracted='{}', anomalies='["ML service unavailable - fallback score applied"]',
-       signal_breakdown='{"ocr":50,"visual":50,"batch":50,"barcode":50,"community":100}' WHERE id=?`,
-      [scanId]
+       signal_breakdown=?, db_match_results='{}', image_analysis='{}', barcode_status='{}' WHERE id=?`,
+      [JSON.stringify(fallbackBreakdown), scanId]
     );
     sendWs(scanId, {
-      status: 'completed', scanId,
-      data: { id: scanId, authenticity_score: 50, verdict: 'caution',
-        ocr_extracted: {}, anomalies: ['ML service unavailable - fallback score applied'],
-        signal_breakdown: { ocr: 50, visual: 50, batch: 50, barcode: 50, community: 100 }, lat, lng }
+      status: 'completed',
+      scanId,
+      data: {
+        id: scanId,
+        authenticity_score: 50,
+        verdict: 'caution',
+        ocr_extracted: {},
+        db_match_results: {},
+        image_analysis: {},
+        barcode_status: {},
+        anomalies: ['ML service unavailable - fallback score applied'],
+        signal_breakdown: fallbackBreakdown,
+        lat,
+        lng
+      }
     });
   }
 }
 
+// Get full scan details
 fastify.get('/api/v1/scans/:id', { preHandler: optionalAuth }, async (request, reply) => {
   const scan = await query.get(
-    `SELECT s.*, m.name as medicine_name, m.generic_name, m.manufacturer_name
-     FROM scans s LEFT JOIN medicines m ON s.medicine_id = m.id WHERE s.id=?`, [request.params.id]);
+    `SELECT s.*,
+            m.name as medicine_name, m.generic_name, m.manufacturer_name,
+            mb.batch_number as batch_batch_number, mb.manufacturing_date as batch_mfg_date,
+            mb.expiry_date as batch_exp_date, mb.mrp as batch_mrp,
+            mb.manufacturing_license as batch_license, mb.pack_type, mb.pack_size,
+            mb.country_of_origin, mb.status as batch_status
+     FROM scans s
+     LEFT JOIN medicines m ON s.medicine_id = m.id
+     LEFT JOIN medicine_batches mb ON s.batch_id = mb.id
+     WHERE s.id=?`,
+    [request.params.id]
+  );
   if (!scan) return reply.status(404).send({ error: 'Scan not found' });
-  return { ...scan,
+
+  return {
+    ...scan,
     ocr_extracted: scan.ocr_extracted ? JSON.parse(scan.ocr_extracted) : null,
+    db_match_results: scan.db_match_results ? JSON.parse(scan.db_match_results) : null,
+    image_analysis: scan.image_analysis ? JSON.parse(scan.image_analysis) : null,
+    barcode_status: scan.barcode_status ? JSON.parse(scan.barcode_status) : null,
     anomalies: scan.anomalies ? JSON.parse(scan.anomalies) : [],
     signal_breakdown: scan.signal_breakdown ? JSON.parse(scan.signal_breakdown) : null
   };
@@ -342,23 +477,28 @@ fastify.get('/api/v1/scans/history', { preHandler: authenticate }, async (reques
     `SELECT s.id, s.image_url, s.authenticity_score, s.verdict, s.scanned_at,
      m.name as medicine_name, m.generic_name, m.manufacturer_name
      FROM scans s LEFT JOIN medicines m ON s.medicine_id=m.id
-     WHERE s.user_id=? ORDER BY s.scanned_at DESC LIMIT 50`, [request.user.id]);
+     WHERE s.user_id=? ORDER BY s.scanned_at DESC LIMIT 50`,
+    [request.user.id]
+  );
 });
 
-// ──────────────────────────────────────── ALERTS ────────────────────────────────────────
+// ─── ALERTS ───────────────────────────────────────────────────────────────────
 
 fastify.get('/api/v1/alerts/map', async () => {
   const alerts = await query.all(
     `SELECT a.*, m.name as medicine_name, m.manufacturer_name, m.generic_name
-     FROM alerts a JOIN medicines m ON a.medicine_id=m.id`);
+     FROM alerts a JOIN medicines m ON a.medicine_id=m.id`
+  );
   return {
     type: 'FeatureCollection',
     features: alerts.map(a => ({
       type: 'Feature', id: a.id,
       geometry: { type: 'Point', coordinates: [a.lng, a.lat] },
-      properties: { medicine_name: a.medicine_name, manufacturer_name: a.manufacturer_name,
+      properties: {
+        medicine_name: a.medicine_name, manufacturer_name: a.manufacturer_name,
         batch_number: a.batch_number, report_count: a.report_count, severity: a.severity,
-        generic_name: a.generic_name }
+        generic_name: a.generic_name
+      }
     }))
   };
 });
@@ -366,27 +506,46 @@ fastify.get('/api/v1/alerts/map', async () => {
 fastify.get('/api/v1/alerts/feed', async () => {
   return await query.all(
     `SELECT a.*, m.name as medicine_name, m.generic_name, m.manufacturer_name
-     FROM alerts a JOIN medicines m ON a.medicine_id=m.id ORDER BY a.last_updated DESC LIMIT 30`);
+     FROM alerts a JOIN medicines m ON a.medicine_id=m.id ORDER BY a.last_updated DESC LIMIT 30`
+  );
 });
+
+// ─── REPORTS ──────────────────────────────────────────────────────────────────
 
 fastify.post('/api/v1/reports', { preHandler: authenticate }, async (request, reply) => {
   const parsed = validate(reportSchema, request.body);
   if (!parsed.valid) return reply.status(400).send({ error: parsed.error });
-  const { medicine_id, batch_number, lat, lng } = parsed.data;
+  const { medicine_id, batch_number, lat, lng, notes, scan_id } = parsed.data;
 
-  const existing = await query.get('SELECT * FROM alerts WHERE medicine_id=? AND batch_number=?', [medicine_id, batch_number]);
+  // Update or create alert
+  const existing = await query.get(
+    'SELECT * FROM alerts WHERE medicine_id=? AND batch_number=?',
+    [medicine_id, batch_number]
+  );
   if (existing) {
     const c = existing.report_count + 1;
-    await query.run('UPDATE alerts SET report_count=?, severity=?, last_updated=CURRENT_TIMESTAMP WHERE id=?',
-      [c, c >= 3 ? 'high' : 'caution', existing.id]);
+    await query.run(
+      'UPDATE alerts SET report_count=?, severity=?, last_updated=CURRENT_TIMESTAMP WHERE id=?',
+      [c, c >= 3 ? 'high' : 'caution', existing.id]
+    );
   } else {
-    await query.run('INSERT INTO alerts (id,medicine_id,batch_number,report_count,lat,lng,severity) VALUES (?,?,?,1,?,?,?)',
-      ['alt-' + generateId(), medicine_id, batch_number, lat || 22.0, lng || 73.0, 'caution']);
+    await query.run(
+      'INSERT INTO alerts (id,medicine_id,batch_number,report_count,lat,lng,severity) VALUES (?,?,?,1,?,?,?)',
+      ['alt-' + generateId(), medicine_id, batch_number, lat || 22.0, lng || 73.0, 'caution']
+    );
   }
+
+  // Save report record
+  await query.run(
+    `INSERT INTO reports (id, scan_id, user_id, medicine_id, batch_number, notes, lat, lng)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ['rpt-' + generateId(), scan_id || null, request.user.id, medicine_id, batch_number, notes || null, lat || null, lng || null]
+  );
+
   return { success: true };
 });
 
-// ──────────────────────────────────────── DASHBOARD ────────────────────────────────────────
+// ─── DASHBOARD ────────────────────────────────────────────────────────────────
 
 fastify.get('/api/v1/dashboard/pharmacist', { preHandler: authenticate }, async (request, reply) => {
   if (!['pharmacist', 'inspector'].includes(request.user.role)) {
@@ -403,16 +562,19 @@ fastify.get('/api/v1/dashboard/pharmacist', { preHandler: authenticate }, async 
     `SELECT s.id, s.authenticity_score, s.verdict, s.scanned_at, s.image_url,
      m.name as medicine_name, m.manufacturer_name
      FROM scans s LEFT JOIN medicines m ON s.medicine_id=m.id
-     ORDER BY s.scanned_at DESC LIMIT 15`);
+     ORDER BY s.scanned_at DESC LIMIT 15`
+  );
 
   const topFlagged = await query.all(
     `SELECT m.name, m.manufacturer_name, COUNT(*) as flag_count
      FROM scans s JOIN medicines m ON s.medicine_id=m.id
-     WHERE s.verdict='high_risk' GROUP BY m.name ORDER BY flag_count DESC LIMIT 5`);
+     WHERE s.verdict='high_risk' GROUP BY m.name ORDER BY flag_count DESC LIMIT 5`
+  );
 
   return {
     stats: { total_scans: total.c, high_risk: hr.c, caution: ca.c, verified: ve.c, active_alerts: al.c },
-    recentScans, topFlagged
+    recentScans,
+    topFlagged
   };
 });
 
@@ -420,12 +582,15 @@ fastify.get('/api/v1/analytics/district', { preHandler: authenticate }, async (r
   if (request.user.role !== 'inspector') return reply.status(403).send({ error: 'Inspector role required' });
   return await query.all(
     `SELECT m.manufacturer_name, s.verdict, COUNT(*) as count
-     FROM scans s JOIN medicines m ON s.medicine_id=m.id GROUP BY m.manufacturer_name, s.verdict`);
+     FROM scans s JOIN medicines m ON s.medicine_id=m.id GROUP BY m.manufacturer_name, s.verdict`
+  );
 });
 
 fastify.get('/api/v1/health', async () => {
-  return { status: 'healthy', db: 'sqlite', time: new Date().toISOString(), version: '2.0.0' };
+  return { status: 'healthy', db: 'sqlite', time: new Date().toISOString(), version: '3.0.0' };
 });
+
+// ─── Start server ─────────────────────────────────────────────────────────────
 
 try {
   await fastify.listen({ port: PORT, host: '0.0.0.0' });

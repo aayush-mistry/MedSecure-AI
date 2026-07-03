@@ -27,7 +27,7 @@ except Exception:
         return []
     print("ZBar not available. Barcode detection disabled.")
 
-app = FastAPI(title="MedSecure ML Inference Service v3")
+app = FastAPI(title="MedSecure ML Inference Service v4")
 
 print("Loading EasyOCR model (CPU)...")
 reader = easyocr.Reader(['en'], gpu=False, verbose=False)
@@ -44,8 +44,9 @@ STAGES = [
     "ocr_extraction",
     "barcode_decoding",
     "visual_analysis",
-    "medicine_matching",
-    "batch_validation",
+    "medicine_lookup",
+    "batch_lookup",
+    "field_comparison",
     "scoring"
 ]
 
@@ -76,6 +77,8 @@ def set_progress(scan_id, stage, stage_index, progress, status="processing"):
             "progress": progress,
             "status": status
         }
+
+# ─── Image Preprocessing ──────────────────────────────────────────────────────
 
 def preprocess_image(file_path):
     """Enhance image for better OCR and CV analysis: deskew, denoise, contrast."""
@@ -120,11 +123,13 @@ def preprocess_image(file_path):
 
     return final, anomalies
 
+# ─── Barcode Extraction ───────────────────────────────────────────────────────
+
 def extract_barcodes(file_path):
     """Detect and decode barcodes from image using pyzbar."""
     img = cv2.imread(file_path)
     if img is None:
-        return [], 0.0
+        return [], []
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     barcodes = zbar_decode(gray)
@@ -143,26 +148,56 @@ def extract_barcodes(file_path):
             "h": rect.height
         })
 
-    # Score: 
-    # - 100 if barcodes found and data is valid
-    # - 50 if no barcodes (neutral - could be obscured or lighting)
-    # - 0 if barcodes present but all have very short/invalid data
-    if not results:
-        return [], 50.0
+    return results
 
-    valid_count = sum(1 for r in results if len(r["data"]) >= 4)
-    if valid_count == 0:
-        return results, 20.0
+# ─── Date Normalization ───────────────────────────────────────────────────────
 
-    score = min(100.0, 60.0 + (valid_count / len(results)) * 40.0)
-    return results, score
+def normalize_date(date_str):
+    """Normalize date to MM/YYYY format for comparison.
+    Accepts: 08/2027, 08-2027, 08/27, 08-27, 2027/08, etc.
+    Returns: MM/YYYY string or original string if unparseable.
+    """
+    if not date_str:
+        return ""
+    date_str = date_str.strip()
+
+    # Try MM/YYYY or MM-YYYY
+    m = re.match(r'^(\d{2})[/-](\d{4})$', date_str)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+
+    # Try MM/YY or MM-YY  (expand to MM/20YY)
+    m = re.match(r'^(\d{2})[/-](\d{2})$', date_str)
+    if m:
+        return f"{m.group(1)}/20{m.group(2)}"
+
+    # Try YYYY/MM or YYYY-MM
+    m = re.match(r'^(\d{4})[/-](\d{2})$', date_str)
+    if m:
+        return f"{m.group(2)}/{m.group(1)}"
+
+    return date_str
+
+# ─── OCR Field Extraction ─────────────────────────────────────────────────────
 
 def extract_fields(ocr_results):
+    """Extract structured medicine fields from EasyOCR results."""
     lines = [r[1].strip() for r in ocr_results if len(r[1].strip()) >= 2]
     full = " ".join(lines)
 
-    fields = {"name": "", "manufacturer": "", "batch_number": "", "expiry_date": "", "mfg_date": "", "mrp": ""}
+    fields = {
+        "name": "",
+        "manufacturer": "",
+        "batch_number": "",
+        "expiry_date": "",
+        "mfg_date": "",
+        "mrp": "",
+        "license_number": "",
+        "ocr_boxes": [],
+        "barcodes": []
+    }
 
+    # Batch number
     batch_m = re.search(
         r'(?:batch\s*(?:no|number|n\.?o?\.?)|b\.?\s*n\.?\s*o?\.?)\s*[:\-\s]*([A-Z0-9][A-Z0-9\-/]{2,})',
         full, re.IGNORECASE)
@@ -173,26 +208,47 @@ def extract_fields(ocr_results):
         if standalone:
             fields["batch_number"] = standalone.group(1)
 
-    exp_m = re.search(r'(?:exp\.?\s*(?:date|dt)?|expiry)\s*[:\-\s]*((?:\d{2})[/\-](?:\d{2,4}))', full, re.IGNORECASE)
+    # Expiry date
+    exp_m = re.search(
+        r'(?:exp\.?\s*(?:date|dt)?|expiry)\s*[:\-\s]*((?:\d{2})[/\-](?:\d{2,4}))',
+        full, re.IGNORECASE)
     if exp_m:
-        fields["expiry_date"] = exp_m.group(1)
+        fields["expiry_date"] = normalize_date(exp_m.group(1))
 
-    mfg_m = re.search(r'(?:mfg\.?\s*(?:date|dt)?|mfd\.?)\s*[:\-\s]*((?:\d{2})[/\-](?:\d{2,4}))', full, re.IGNORECASE)
+    # Manufacturing date
+    mfg_m = re.search(
+        r'(?:mfg\.?\s*(?:date|dt)?|mfd\.?)\s*[:\-\s]*((?:\d{2})[/\-](?:\d{2,4}))',
+        full, re.IGNORECASE)
     if mfg_m:
-        fields["mfg_date"] = mfg_m.group(1)
+        fields["mfg_date"] = normalize_date(mfg_m.group(1))
 
-    mrp_m = re.search(r'(?:mrp|m\.?r\.?p\.?|price)\s*[:\-\s]*(?:rs\.?\s*)?(\d+\.?\d*)', full, re.IGNORECASE)
+    # MRP
+    mrp_m = re.search(
+        r'(?:mrp|m\.?r\.?p\.?|price)\s*[:\-\s]*(?:rs\.?\s*)?(\d+\.?\d*)',
+        full, re.IGNORECASE)
     if mrp_m:
-        fields["mrp"] = f"\u20b9{mrp_m.group(1)}"
+        fields["mrp"] = f"₹{mrp_m.group(1)}"
 
-    mfr_m = re.search(r'(?:mfg\.?\s*by|manufactured\s*by)\s*[:\-\s]*(.+?)(?:\r|\n|$)', full, re.IGNORECASE)
+    # Manufacturer
+    mfr_m = re.search(
+        r'(?:mfg\.?\s*by|manufactured\s*by|mfr\.?\s*by)\s*[:\-\s]*(.+?)(?:\r|\n|$)',
+        full, re.IGNORECASE)
     if mfr_m:
-        fields["manufacturer"] = mfr_m.group(1).strip()[:60]
+        fields["manufacturer"] = mfr_m.group(1).strip()[:80]
+
+    # Manufacturing License Number
+    lic_m = re.search(
+        r'(?:mfg\.?\s*lic\.?(?:\s*no\.?)?|manufacturing\s*licen[sc]e(?:\s*no\.?)?|lic\.?\s*no\.?)\s*[:\-\s]*([A-Z0-9/\-\.]{6,})',
+        full, re.IGNORECASE)
+    if lic_m:
+        fields["license_number"] = lic_m.group(1).strip()[:60]
 
     return fields, lines
 
+# ─── Visual Quality Analysis ──────────────────────────────────────────────────
+
 def analyze_visual_quality(img, expected_colors_json):
-    """Full visual analysis with better metrics than before."""
+    """Full visual analysis: blur, color deviation, edge density, saturation, JPEG artifacts."""
     if img is None:
         return 50.0, ["Image could not be loaded for visual analysis"]
 
@@ -201,7 +257,7 @@ def analyze_visual_quality(img, expected_colors_json):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = img.shape[:2]
 
-    # 1. Blur detection (Laplacian variance) - improved thresholds
+    # 1. Blur detection (Laplacian variance)
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
     if laplacian_var < 30:
         score -= 45
@@ -213,37 +269,25 @@ def analyze_visual_quality(img, expected_colors_json):
         score -= 15
         anomalies.append(f"Moderate blur in print (sharpness: {laplacian_var:.0f}). Possible quality issue.")
 
-    # 2. Color profile deviation - sample only non-white/near-white regions for true dominant color
+    # 2. Color profile deviation
     try:
         expected = json.loads(expected_colors_json) if isinstance(expected_colors_json, str) else expected_colors_json
         primary_hex = expected.get("primary", "#ffffff").lstrip('#')
         expected_rgb = np.array([int(primary_hex[i:i+2], 16) for i in (0, 2, 4)], dtype=np.float64)
         expected_bgr = expected_rgb[::-1]
 
-        # Sample border regions for packaging color (excluding white/near-white pixels)
         top_strip = img[0:int(h*0.12), :].reshape(-1, 3)
         bottom_strip = img[int(h*0.88):, :].reshape(-1, 3)
 
-        # Filter out white/near-white pixels (background)
         non_white_mask = ~(np.all(top_strip > 200, axis=1))
-        if np.any(non_white_mask):
-            top_colors = top_strip[non_white_mask]
-        else:
-            top_colors = top_strip
+        top_colors = top_strip[non_white_mask] if np.any(non_white_mask) else top_strip
 
         non_white_mask = ~(np.all(bottom_strip > 200, axis=1))
-        if np.any(non_white_mask):
-            bottom_colors = bottom_strip[non_white_mask]
-        else:
-            bottom_colors = bottom_strip
+        bottom_colors = bottom_strip[non_white_mask] if np.any(non_white_mask) else bottom_strip
 
         if len(top_colors) > 0 and len(bottom_colors) > 0:
-            mean_top = np.mean(top_colors, axis=0)
-            mean_bottom = np.mean(bottom_colors, axis=0)
-            mean_color = (mean_top + mean_bottom) / 2
-
+            mean_color = (np.mean(top_colors, axis=0) + np.mean(bottom_colors, axis=0)) / 2
             dist = np.linalg.norm(expected_bgr - mean_color)
-
             if dist > 120:
                 score -= 35
                 anomalies.append(f"Major packaging color mismatch (delta: {dist:.0f}). Expected primary hue #{primary_hex}, detected significantly different palette.")
@@ -263,22 +307,18 @@ def analyze_visual_quality(img, expected_colors_json):
         score -= 10
         anomalies.append("Low text/edge density. Packaging may have missing printed content.")
 
-    # 4. Check for unnatural color saturation (common in cheap reprints)
+    # 4. Unnatural color saturation
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    saturation = hsv[:, :, 1]
-    mean_sat = np.mean(saturation)
+    mean_sat = np.mean(hsv[:, :, 1])
     if mean_sat > 180:
         score -= 10
         anomalies.append("Atypically high color saturation. Common in digitally reprinted packaging.")
 
-    # 5. Check for compression artifacts (JPEG blockiness)
-    # Low-quality JPEGs have blocky artifacts visible in DCT
-    # Check variance of 8x8 blocks
+    # 5. JPEG compression artifacts
     block_variances = []
     for i in range(0, h - 8, 8):
         for j in range(0, w - 8, 8):
-            block = gray[i:i+8, j:j+8]
-            block_variances.append(np.var(block))
+            block_variances.append(np.var(gray[i:i+8, j:j+8]))
     mean_block_var = np.mean(block_variances) if block_variances else 0
     if mean_block_var < 20:
         score -= 5
@@ -286,18 +326,30 @@ def analyze_visual_quality(img, expected_colors_json):
 
     return max(0.0, score), anomalies
 
-def match_medicine(lines, full_text, medicines):
+# ─── Medicine Lookup ──────────────────────────────────────────────────────────
+
+def lookup_medicine(extracted_name, lines, full_text, conn):
+    """Find the best matching medicine in the DB using fuzzy text matching."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, generic_name, manufacturer_name, approved_batch_format,
+               composition, expected_colors, barcode_required
+        FROM medicines
+    """)
+    medicines = [dict(r) for r in cur.fetchall()]
+
     best_med = None
     best_score = 0.0
 
+    # First pass: exact substring match in full_text
     for med in medicines:
-        name_lower = med["name"].lower()
-        if name_lower in full_text.lower():
+        if med["name"].lower() in full_text.lower():
             ratio = 0.95
             if ratio > best_score:
                 best_score = ratio
                 best_med = med
 
+    # Second pass: fuzzy line-by-line
     if best_score < 0.7:
         for line in lines:
             if len(line) < 3:
@@ -310,9 +362,234 @@ def match_medicine(lines, full_text, medicines):
 
     return best_med, best_score
 
+# ─── Batch Lookup ─────────────────────────────────────────────────────────────
+
+def lookup_batch(medicine_id, batch_number, conn):
+    """Look up a genuine batch record in medicine_batches."""
+    if not medicine_id or not batch_number:
+        return None
+    cur = conn.cursor()
+    row = cur.execute(
+        """SELECT * FROM medicine_batches
+           WHERE medicine_id = ? AND batch_number = ?""",
+        (medicine_id, batch_number)
+    ).fetchone()
+    return dict(row) if row else None
+
+# ─── Field Comparison ─────────────────────────────────────────────────────────
+
+def compare_fields(extracted, batch_row, medicine):
+    """Compare every extracted OCR field against the stored batch / medicine record.
+    Returns a dict of field comparison results.
+    """
+    results = {}
+
+    def make_result(extracted_val, stored_val, match, note=None):
+        r = {"extracted": extracted_val, "stored": stored_val, "match": match}
+        if note:
+            r["note"] = note
+        return r
+
+    # ── Batch Number ──
+    ext_batch = (extracted.get("batch_number") or "").strip()
+    stored_batch = (batch_row.get("batch_number") or "") if batch_row else None
+    if batch_row is None:
+        results["batch_number"] = make_result(ext_batch, None, False, "Batch not found in genuine batch database")
+    else:
+        results["batch_number"] = make_result(ext_batch, stored_batch, ext_batch.upper() == (stored_batch or "").upper())
+
+    # ── Manufacturer ──
+    ext_mfr = (extracted.get("manufacturer") or "").strip()
+    stored_mfr = (batch_row.get("manufacturer") or "") if batch_row else (medicine.get("manufacturer_name") or "")
+    if ext_mfr:
+        # Fuzzy match for manufacturer names (allow partial/abbreviation differences)
+        ratio = difflib.SequenceMatcher(None, ext_mfr.lower(), stored_mfr.lower()).ratio()
+        match = ratio >= 0.75
+        results["manufacturer"] = make_result(ext_mfr, stored_mfr, match,
+            None if match else f"Manufacturer name similarity: {ratio:.0%}")
+    else:
+        results["manufacturer"] = make_result("", stored_mfr, False, "Manufacturer not detected in OCR")
+
+    # ── Manufacturing Date ──
+    ext_mfg = normalize_date(extracted.get("mfg_date") or "")
+    stored_mfg = normalize_date((batch_row.get("manufacturing_date") or "") if batch_row else "")
+    if not ext_mfg:
+        results["manufacturing_date"] = make_result("", stored_mfg, False, "Manufacturing date not detected")
+    elif not stored_mfg:
+        results["manufacturing_date"] = make_result(ext_mfg, None, False, "No stored date to compare")
+    else:
+        results["manufacturing_date"] = make_result(ext_mfg, stored_mfg, ext_mfg == stored_mfg)
+
+    # ── Expiry Date ──
+    ext_exp = normalize_date(extracted.get("expiry_date") or "")
+    stored_exp = normalize_date((batch_row.get("expiry_date") or "") if batch_row else "")
+    if not ext_exp:
+        results["expiry_date"] = make_result("", stored_exp, False, "Expiry date not detected")
+    elif not stored_exp:
+        results["expiry_date"] = make_result(ext_exp, None, False, "No stored date to compare")
+    else:
+        results["expiry_date"] = make_result(ext_exp, stored_exp, ext_exp == stored_exp)
+
+    # ── MRP ──
+    ext_mrp = (extracted.get("mrp") or "").strip()
+    stored_mrp = (batch_row.get("mrp") or "") if batch_row else ""
+    if not ext_mrp:
+        results["mrp"] = make_result("", stored_mrp, False, "MRP not detected")
+    elif not stored_mrp:
+        results["mrp"] = make_result(ext_mrp, None, False, "No stored MRP to compare")
+    else:
+        # Normalize: strip ₹ and whitespace, compare numeric value
+        def parse_mrp(s):
+            m = re.search(r'(\d+\.?\d*)', s.replace('₹', '').replace('Rs', ''))
+            return float(m.group(1)) if m else None
+        ev = parse_mrp(ext_mrp)
+        sv = parse_mrp(stored_mrp)
+        if ev is not None and sv is not None:
+            # Allow ±1 rupee tolerance
+            match = abs(ev - sv) <= 1.0
+            results["mrp"] = make_result(ext_mrp, stored_mrp, match,
+                None if match else f"MRP mismatch: extracted ₹{ev}, stored ₹{sv}")
+        else:
+            results["mrp"] = make_result(ext_mrp, stored_mrp, ext_mrp.strip() == stored_mrp.strip())
+
+    # ── Manufacturing License ──
+    ext_lic = (extracted.get("license_number") or "").strip()
+    stored_lic = (batch_row.get("manufacturing_license") or "") if batch_row else ""
+    if not ext_lic:
+        results["license_number"] = make_result("", stored_lic, False, "License number not detected in OCR")
+    elif not stored_lic:
+        results["license_number"] = make_result(ext_lic, None, False, "No stored license to compare")
+    else:
+        match = ext_lic.upper().replace(" ", "") == stored_lic.upper().replace(" ", "")
+        results["license_number"] = make_result(ext_lic, stored_lic, match)
+
+    return results
+
+# ─── Barcode Verification ─────────────────────────────────────────────────────
+
+def verify_barcode(barcodes_detected, batch_row, medicine):
+    """Verify barcode against database record.
+    - If barcode_required is False: skip, return neutral status.
+    - If barcode_required is True: decode and compare.
+    """
+    barcode_required = False
+    if batch_row:
+        barcode_required = bool(batch_row.get("barcode_required", 0))
+    elif medicine:
+        barcode_required = bool(medicine.get("barcode_required", 0))
+
+    if not barcode_required:
+        return {
+            "required": False,
+            "found": len(barcodes_detected) > 0,
+            "match": None,
+            "note": "Barcode not required for this pack type"
+        }, None  # score contribution: None (excluded from calculation)
+
+    # Barcode IS required
+    if not barcodes_detected:
+        return {
+            "required": True,
+            "found": False,
+            "match": False,
+            "note": "Barcode required but not detected on packaging"
+        }, 0.0
+
+    # Try to match any detected barcode against stored value
+    stored_value = (batch_row.get("barcode_value") or "") if batch_row else ""
+    for bc in barcodes_detected:
+        decoded = bc.get("data", "")
+        if stored_value and decoded.strip() == stored_value.strip():
+            return {
+                "required": True,
+                "found": True,
+                "match": True,
+                "decoded_value": decoded,
+                "stored_value": stored_value,
+                "note": "Barcode verified successfully"
+            }, 100.0
+
+    # Barcodes found but none match
+    decoded_values = [bc.get("data", "") for bc in barcodes_detected]
+    return {
+        "required": True,
+        "found": True,
+        "match": False,
+        "decoded_value": decoded_values[0] if decoded_values else "",
+        "stored_value": stored_value,
+        "note": "Barcode found but does not match registered value"
+    }, 0.0
+
+# ─── Scoring Engine ───────────────────────────────────────────────────────────
+
+def calculate_score(field_comparisons, image_score, barcode_score, medicine_name_match):
+    """Weighted scoring with optional barcode contribution.
+
+    Weights (barcode required):
+      batch_number     35%
+      mfg_date         15%
+      expiry_date      15%
+      manufacturer     10%
+      medicine_name    10%
+      image_analysis   10%
+      barcode           5%
+
+    If barcode is not required (barcode_score is None), redistribute its 5%
+    proportionally across batch_number, mfg_date, expiry_date, manufacturer, medicine_name.
+    """
+    BASE_WEIGHTS = {
+        "batch_number":       0.35,
+        "manufacturing_date": 0.15,
+        "expiry_date":        0.15,
+        "manufacturer":       0.10,
+        "medicine_name":      0.10,
+        "image_analysis":     0.10,
+        "barcode":            0.05,
+    }
+
+    # Convert field comparison results to scores (100 if match, 0 if not)
+    def field_score(key):
+        if key not in field_comparisons:
+            return 0.0
+        fc = field_comparisons[key]
+        if fc.get("extracted") == "" and fc.get("stored") in (None, ""):
+            return 50.0  # neutral — field simply not present
+        return 100.0 if fc.get("match") else 0.0
+
+    scores = {
+        "batch_number":       field_score("batch_number"),
+        "manufacturing_date": field_score("manufacturing_date"),
+        "expiry_date":        field_score("expiry_date"),
+        "manufacturer":       field_score("manufacturer"),
+        "medicine_name":      100.0 if medicine_name_match else 0.0,
+        "image_analysis":     image_score,
+        "barcode":            barcode_score,  # None or float
+    }
+
+    weights = dict(BASE_WEIGHTS)
+
+    if barcode_score is None:
+        # Redistribute barcode weight proportionally among non-image, non-barcode fields
+        redistribute = weights.pop("barcode")
+        redistributable_keys = ["batch_number", "manufacturing_date", "expiry_date", "manufacturer", "medicine_name"]
+        total_w = sum(weights[k] for k in redistributable_keys)
+        for k in redistributable_keys:
+            weights[k] += redistribute * (weights[k] / total_w)
+        scores.pop("barcode")
+
+    composite = sum(scores[k] * weights[k] for k in scores)
+    composite = max(0.0, min(100.0, round(composite, 1)))
+
+    # Build signal_breakdown dict for frontend display
+    breakdown = {k: round(v, 1) if v is not None else None for k, v in scores.items()}
+    return composite, breakdown
+
+# ─── Main Pipeline ────────────────────────────────────────────────────────────
+
 def run_full_pipeline(scan_id, file_path):
-    """Execute the full scan pipeline with progress tracking."""
+    """Execute the full database-driven scan pipeline with progress tracking."""
     try:
+        # ── Stage 0: Preprocessing ──────────────────────────────────────────
         set_progress(scan_id, "preprocessing", 0, 0.0)
         time.sleep(0.1)
 
@@ -331,12 +608,11 @@ def run_full_pipeline(scan_id, file_path):
         else:
             width, height = 800, 600
 
-        # Preprocess
         processed_img, preproc_anomalies = preprocess_image(file_path)
-        set_progress(scan_id, "ocr_extraction", 1, 0.25)
+        set_progress(scan_id, "ocr_extraction", 1, 0.14)
         time.sleep(0.1)
 
-        # OCR
+        # ── Stage 1: OCR Extraction ─────────────────────────────────────────
         if processed_img is not None:
             temp_path = file_path + "_enhanced.jpg"
             cv2.imwrite(temp_path, processed_img)
@@ -348,16 +624,13 @@ def run_full_pipeline(scan_id, file_path):
         else:
             ocr_results = reader.readtext(file_path)
 
-        set_progress(scan_id, "barcode_decoding", 2, 0.45)
+        set_progress(scan_id, "barcode_decoding", 2, 0.28)
         time.sleep(0.1)
 
-        # Barcode detection
-        barcodes, barcode_score = extract_barcodes(file_path)
+        # ── Stage 2: Barcode Decoding ───────────────────────────────────────
+        barcodes_detected = extract_barcodes(file_path)
 
-        set_progress(scan_id, "visual_analysis", 3, 0.60)
-        time.sleep(0.1)
-
-        # Build OCR boxes
+        # Build OCR boxes for frontend overlay
         ocr_boxes = []
         for bbox, text, conf in ocr_results:
             try:
@@ -380,119 +653,163 @@ def run_full_pipeline(scan_id, file_path):
 
         fields, lines = extract_fields(ocr_results)
         fields["ocr_boxes"] = ocr_boxes
-        fields["barcodes"] = barcodes
+        fields["barcodes"] = barcodes_detected
         full_text = " ".join(lines)
 
-        set_progress(scan_id, "medicine_matching", 4, 0.75)
+        set_progress(scan_id, "visual_analysis", 3, 0.42)
+        time.sleep(0.1)
 
+        # ── Stage 3: Visual Analysis ────────────────────────────────────────
+        # Will be completed after medicine lookup (needs expected_colors)
+        # placeholder — actual analysis happens after medicine lookup
+
+        set_progress(scan_id, "medicine_lookup", 4, 0.56)
+        time.sleep(0.1)
+
+        # ── Stage 4: Medicine Lookup ────────────────────────────────────────
         conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT id, name, generic_name, manufacturer_name, approved_batch_format, composition, expected_colors FROM medicines")
-        medicines = [dict(r) for r in cur.fetchall()]
 
-        matched, match_ratio = match_medicine(lines, full_text, medicines)
+        matched_medicine, match_ratio = lookup_medicine(
+            fields.get("name", ""), lines, full_text, conn
+        )
 
-        anomalies = []
-        ocr_score = 0.0
-        visual_score = 100.0
-        batch_score = 100.0
-        community_score = 100.0
+        anomalies = list(preproc_anomalies)
         medicine_id = None
+        medicine_name_match = False
 
-        if matched and match_ratio >= 0.5:
-            medicine_id = matched["id"]
-            fields["name"] = matched["name"]
+        if matched_medicine and match_ratio >= 0.5:
+            medicine_id = matched_medicine["id"]
+            fields["name"] = matched_medicine["name"]
             if not fields["manufacturer"]:
-                fields["manufacturer"] = matched["manufacturer_name"]
-
-            ocr_score = min(100.0, match_ratio * 100.0)
-
-            set_progress(scan_id, "batch_validation", 5, 0.85)
-
-            # Batch validation
-            batch = fields["batch_number"]
-            if batch:
-                pattern = matched["approved_batch_format"]
-                try:
-                    if not re.match(pattern, batch):
-                        batch_score = 0.0
-                        anomalies.append(
-                            f"Batch '{batch}' does not match registered format '{pattern}' for {matched['name']}. "
-                            f"Possible counterfeit or re-labelled packaging.")
-                except Exception:
-                    pass
-            else:
-                batch_score = 40.0
-                anomalies.append("Batch number not detected on packaging. Field may be obscured or absent.")
-
-            # Visual analysis with the original image (not preprocessed, for true quality check)
-            visual_score, vis_anomalies = analyze_visual_quality(img_cv if img_cv is not None else cv2.imread(file_path), matched["expected_colors"])
-            anomalies.extend(preproc_anomalies)
-            # Don't add deskew note as an anomaly if score is good
-            for a in vis_anomalies:
-                if "deskewed" not in a.lower():
-                    anomalies.append(a)
-
-            # Community alert check
-            if batch:
-                alert = cur.execute("SELECT report_count FROM alerts WHERE medicine_id=? AND batch_number=?",
-                                    (medicine_id, batch)).fetchone()
-                if alert:
-                    rc = alert["report_count"]
-                    if rc >= 3:
-                        community_score = 0.0
-                        anomalies.append(f"Active recall: {rc} independent pharmacy reports confirm this batch as counterfeit.")
-                    elif rc >= 1:
-                        community_score = 50.0
-                        anomalies.append(f"Community caution: {rc} suspect report(s) filed for batch {batch}.")
-
+                fields["manufacturer"] = matched_medicine["manufacturer_name"]
+            medicine_name_match = True
         else:
-            ocr_score = 0.0
-            visual_score = 35.0
-            batch_score = 0.0
-            barcode_score = 0.0
             fields["name"] = "Unidentified Medicine"
-            fields["manufacturer"] = "Unknown Manufacturer"
+            fields["manufacturer"] = fields.get("manufacturer") or "Unknown Manufacturer"
             anomalies.append("No matching CDSCO-registered medicine brand identified from packaging text.")
+
+        # Run visual analysis now that we have expected_colors
+        if matched_medicine:
+            visual_score, vis_anomalies = analyze_visual_quality(
+                img_cv if img_cv is not None else cv2.imread(file_path),
+                matched_medicine.get("expected_colors", "{}")
+            )
+        else:
+            visual_score = 35.0
+            vis_anomalies = ["Cannot assess visual quality without identified medicine reference."]
+
+        for a in vis_anomalies:
+            if "deskewed" not in a.lower():
+                anomalies.append(a)
+
+        set_progress(scan_id, "batch_lookup", 5, 0.70)
+        time.sleep(0.1)
+
+        # ── Stage 5: Batch Lookup ───────────────────────────────────────────
+        batch_row = None
+        batch_id = None
+
+        if medicine_id and fields.get("batch_number"):
+            batch_row = lookup_batch(medicine_id, fields["batch_number"], conn)
+            if batch_row:
+                batch_id = batch_row["id"]
+                if batch_row.get("status") == "recalled":
+                    anomalies.append(
+                        f"⚠️ BATCH RECALLED: Batch {fields['batch_number']} has been officially recalled. "
+                        "Do not use this product."
+                    )
+            else:
+                anomalies.append(
+                    f"Batch '{fields['batch_number']}' not found in genuine batch database for {fields['name']}."
+                )
+        elif medicine_id and not fields.get("batch_number"):
+            anomalies.append("Batch number not detected on packaging. Field may be obscured or absent.")
+
+        set_progress(scan_id, "field_comparison", 6, 0.82)
+        time.sleep(0.1)
+
+        # ── Stage 6: Field Comparison ───────────────────────────────────────
+        if matched_medicine:
+            field_comparisons = compare_fields(fields, batch_row, matched_medicine)
+        else:
+            # All fields fail if medicine not identified
+            field_comparisons = {
+                k: {"extracted": fields.get(k, ""), "stored": None, "match": False}
+                for k in ["batch_number", "manufacturer", "manufacturing_date", "expiry_date", "mrp", "license_number"]
+            }
+
+        # Barcode verification
+        barcode_status, barcode_score = verify_barcode(barcodes_detected, batch_row, matched_medicine)
+
+        # Community alert check
+        community_note = None
+        if medicine_id and fields.get("batch_number"):
+            cur = conn.cursor()
+            alert = cur.execute(
+                "SELECT report_count FROM alerts WHERE medicine_id=? AND batch_number=?",
+                (medicine_id, fields["batch_number"])
+            ).fetchone()
+            if alert:
+                rc = alert["report_count"]
+                if rc >= 3:
+                    anomalies.append(
+                        f"🚨 Active community alert: {rc} independent reports confirm this batch as counterfeit."
+                    )
+                    # Apply community penalty to visual score (existing behaviour)
+                    visual_score = min(visual_score, 20.0)
+                elif rc >= 1:
+                    anomalies.append(
+                        f"⚠️ Community caution: {rc} suspect report(s) filed for batch {fields['batch_number']}."
+                    )
 
         conn.close()
 
-        set_progress(scan_id, "scoring", 6, 0.95)
+        # ── Stage 7: Scoring ────────────────────────────────────────────────
+        set_progress(scan_id, "scoring", 7, 0.94)
+        time.sleep(0.1)
 
-        # Composite score with REAL barcode contribution now
-        composite = (visual_score * 0.30) + (ocr_score * 0.25) + (batch_score * 0.20) + (barcode_score * 0.15) + (community_score * 0.10)
-        composite = max(0.0, min(100.0, round(composite, 1)))
+        composite, signal_breakdown = calculate_score(
+            field_comparisons, visual_score, barcode_score, medicine_name_match
+        )
+
+        image_analysis_result = {
+            "score": round(visual_score, 1),
+            "anomalies": [a for a in anomalies if any(kw in a.lower() for kw in [
+                "blur", "color", "edge", "saturation", "jpeg", "deskew"
+            ])]
+        }
 
         result = {
             "medicine_id": medicine_id,
+            "batch_id": batch_id,
             "authenticity_score": composite,
             "ocr_extracted": fields,
+            "db_match_results": field_comparisons,
+            "image_analysis": image_analysis_result,
+            "barcode_status": barcode_status,
             "anomalies": anomalies,
-            "barcodes_detected": barcodes,
-            "signal_breakdown": {
-                "ocr": round(ocr_score, 1),
-                "visual": round(visual_score, 1),
-                "batch": round(batch_score, 1),
-                "barcode": round(barcode_score, 1),
-                "community": round(community_score, 1)
-            }
+            "signal_breakdown": signal_breakdown
         }
 
         with scan_progress_lock:
             scan_progress_store[scan_id] = {
-                "scan_id": scan_id, "stage": "complete", "stage_index": 7,
+                "scan_id": scan_id, "stage": "complete", "stage_index": 8,
                 "total_stages": len(STAGES), "progress": 1.0, "status": "complete",
                 "result": result
             }
 
     except Exception as e:
         print(f"Pipeline error for {scan_id}: {e}")
+        import traceback
+        traceback.print_exc()
         with scan_progress_lock:
             scan_progress_store[scan_id] = {
                 "scan_id": scan_id, "stage": "error", "stage_index": -1,
                 "total_stages": len(STAGES), "progress": 0.0, "status": "error",
                 "error": str(e)
             }
+
+# ─── API Endpoints ────────────────────────────────────────────────────────────
 
 @app.post("/process_scan")
 def process_scan(req: ScanRequest):
@@ -521,7 +838,7 @@ def get_scan_progress(scan_id: str):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "service": "ml", "version": "3.0.0"}
+    return {"status": "healthy", "service": "ml", "version": "4.0.0"}
 
 if __name__ == "__main__":
     import uvicorn

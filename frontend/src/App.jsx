@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Camera, Map as MapIcon, ShieldAlert, Database, History, 
   LayoutDashboard, FileText, CheckCircle, AlertTriangle, XCircle, 
@@ -499,16 +499,19 @@ export default function App() {
             authenticity_score: 98.7,
             verdict: "verified",
             hospital: "Apollo Hospitals",
-            ocr_extracted: {
-              name: "Calpol 500",
-              manufacturer: "GlaxoSmithKline Pharmaceuticals",
-              batch_number: "GP43210",
-              expiry_date: "08-2027",
-              mfg_date: "08-2024",
-              mrp: "Rs. 35.00",
+            ocr_extracted: { name: "Calpol 500", manufacturer: "GlaxoSmithKline Pharmaceuticals", batch_number: "GP43210", expiry_date: "08/2027", mfg_date: "08/2024", mrp: "₹32.00", license_number: "KAR/DRUGS/GSK/14219" },
+            db_match_results: {
+              batch_number: { extracted: "GP43210", stored: "GP43210", match: true },
+              manufacturing_date: { extracted: "08/2024", stored: "08/2024", match: true },
+              expiry_date: { extracted: "08/2027", stored: "07/2027", match: false },
+              manufacturer: { extracted: "GlaxoSmithKline Pharmaceuticals", stored: "GlaxoSmithKline Pharmaceuticals", match: true },
+              mrp: { extracted: "₹32.00", stored: "₹32.00", match: true },
+              license_number: { extracted: "KAR/DRUGS/GSK/14219", stored: "KAR/DRUGS/GSK/14219", match: true }
             },
+            image_analysis: { score: 97, anomalies: [] },
+            barcode_status: { required: false, found: false, match: null, note: 'Barcode not required for strip packaging' },
             anomalies: [],
-            signal_breakdown: { ocr: 99, visual: 98, batch: 100, barcode: 96, community: 100 }
+            signal_breakdown: { batch_number: 100, manufacturing_date: 100, expiry_date: 0, manufacturer: 100, medicine_name: 100, image_analysis: 97, barcode: null }
           };
         } else if (filename.includes('crocin')) {
           offlineResult = {
@@ -517,19 +520,22 @@ export default function App() {
             medicine_name: "Crocin 650",
             generic_name: "Paracetamol",
             manufacturer_name: "GlaxoSmithKline Pharmaceuticals",
-            authenticity_score: 41.5,
-            verdict: "counterfeit",
+            authenticity_score: 24.5,
+            verdict: "high_risk",
             hospital: "Apollo Hospitals",
-            ocr_extracted: {
-              name: "Crocin 650",
-              manufacturer: "GlaxoSmithKline Pharmaceuticals",
-              batch_number: "INVALID-999-BATCH",
-              expiry_date: "12-2028",
-              mfg_date: "12-2025",
-              mrp: "Rs. 20.00",
+            ocr_extracted: { name: "Crocin 650", manufacturer: "GlaxoSmithKline Pharmaceuticals", batch_number: "INVALID-999-BATCH", expiry_date: "12/2028", mfg_date: "12/2025", mrp: "₹55.00", license_number: "" },
+            db_match_results: {
+              batch_number: { extracted: "INVALID-999-BATCH", stored: null, match: false, note: "Batch not found in genuine batch database" },
+              manufacturing_date: { extracted: "12/2025", stored: null, match: false },
+              expiry_date: { extracted: "12/2028", stored: null, match: false },
+              manufacturer: { extracted: "GlaxoSmithKline Pharmaceuticals", stored: null, match: false },
+              mrp: { extracted: "₹55.00", stored: null, match: false },
+              license_number: { extracted: "", stored: null, match: false }
             },
-            anomalies: ["Batch number format mismatch: 'INVALID-999-BATCH' violates manufacturer schema '^BT\\d{4}$'"],
-            signal_breakdown: { ocr: 92, visual: 90, batch: 0, barcode: 0, community: 100 }
+            image_analysis: { score: 62, anomalies: ["High print blur detected. Possible scanned/reprinted packaging."] },
+            barcode_status: { required: true, found: false, match: false, note: 'Barcode required but not detected on packaging' },
+            anomalies: ["Batch 'INVALID-999-BATCH' not found in genuine batch database.", "Barcode required for Crocin 650 box but not present."],
+            signal_breakdown: { batch_number: 0, manufacturing_date: 0, expiry_date: 0, manufacturer: 0, medicine_name: 100, image_analysis: 62, barcode: 0 }
           };
         } else {
           offlineResult = {
@@ -538,19 +544,21 @@ export default function App() {
             medicine_name: "Omez 20",
             generic_name: "Omeprazole",
             manufacturer_name: "Dr. Reddy's Laboratories",
-            authenticity_score: 72.4,
+            authenticity_score: 65.2,
             verdict: "caution",
             hospital: "Apollo Hospitals",
-            ocr_extracted: {
-              name: "Omez 20",
-              manufacturer: "Dr. Reddy's Laboratories",
-              batch_number: "MC8872",
-              expiry_date: "12-2028",
-              mfg_date: "12-2024",
-              mrp: "Rs. 55.00",
+            ocr_extracted: { name: "Omez 20", manufacturer: "Dr. Reddy's Laboratories", batch_number: "MC8872", expiry_date: "12/2028", mfg_date: "12/2024", mrp: "₹48.00", license_number: "" },
+            db_match_results: {
+              batch_number: { extracted: "MC8872", stored: null, match: false, note: "Batch not found in genuine batch database" },
+              manufacturing_date: { extracted: "12/2024", stored: null, match: false },
+              expiry_date: { extracted: "12/2028", stored: null, match: false },
+              manufacturer: { extracted: "Dr. Reddy's Laboratories", stored: null, match: false },
+              mrp: { extracted: "₹48.00", stored: null, match: false }
             },
-            anomalies: ["Packaging color profile variance check: Hue mismatch of 18% from CDSCO reference hex color."],
-            signal_breakdown: { ocr: 95, visual: 60, batch: 100, barcode: 85, community: 80 }
+            image_analysis: { score: 60, anomalies: ["Color variance detected (delta: 74). Possible printing batch color drift."] },
+            barcode_status: { required: false, found: false, match: null, note: 'Barcode not required for this medicine' },
+            anomalies: ["Batch 'MC8872' not found in genuine batch records for Omez 20.", "Packaging color profile variance check: Hue mismatch detected."],
+            signal_breakdown: { batch_number: 0, manufacturing_date: 0, expiry_date: 0, manufacturer: 0, medicine_name: 100, image_analysis: 60, barcode: null }
           };
         }
 
@@ -1560,34 +1568,146 @@ export default function App() {
                       </div>
 
                       <div className="signal-stack">
-                        {[
-                          ['OCR Name accuracy', scanResult.signal_breakdown?.ocr || 90],
-                          ['Visual branding template', scanResult.signal_breakdown?.visual || 90],
-                          ['Batch number format', scanResult.signal_breakdown?.batch || 90]
-                        ].map(([label, value]) => (
+                        {/* ── Database Verification Panel ─────────────────── */}
+                        {scanResult.db_match_results && (
+                          <div className="db-verify-panel">
+                            <div className="db-verify-header">
+                              <Database className="w-3.5 h-3.5" />
+                              <span>Database Verification</span>
+                              {(() => {
+                                const fields = Object.values(scanResult.db_match_results);
+                                const matched = fields.filter(f => f.match).length;
+                                const total = fields.length;
+                                return (
+                                  <span className={`db-verify-badge ${
+                                    matched === total ? 'all-match' : matched > total / 2 ? 'partial-match' : 'no-match'
+                                  }`}>
+                                    {matched}/{total} fields
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                            <table className="db-verify-table">
+                              <thead>
+                                <tr>
+                                  <th>Field</th>
+                                  <th>Extracted (OCR)</th>
+                                  <th>Database Record</th>
+                                  <th>Status</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {Object.entries(scanResult.db_match_results).map(([field, data]) => (
+                                  <tr key={field}>
+                                    <td className="field-name">{field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</td>
+                                    <td className="field-value extracted">{data.extracted || <span className="field-empty">—</span>}</td>
+                                    <td className="field-value stored">{data.stored || <span className="field-empty">Not on record</span>}</td>
+                                    <td className="field-status">
+                                      {data.match === true ? (
+                                        <span className="match-badge match"><CheckCircle className="w-3 h-3" /> Match</span>
+                                      ) : data.match === false ? (
+                                        <span className="match-badge mismatch"><XCircle className="w-3 h-3" /> Mismatch</span>
+                                      ) : (
+                                        <span className="match-badge neutral">—</span>
+                                      )}
+                                      {data.note && <span className="field-note">{data.note}</span>}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+
+                        {/* ── Signal Breakdown Bars ───────────────────────── */}
+                        {scanResult.signal_breakdown && [
+                          ['Batch Number Match', scanResult.signal_breakdown.batch_number ?? scanResult.signal_breakdown.batch],
+                          ['Manufacturing Date', scanResult.signal_breakdown.manufacturing_date ?? scanResult.signal_breakdown.mfg_date],
+                          ['Expiry Date', scanResult.signal_breakdown.expiry_date],
+                          ['Manufacturer', scanResult.signal_breakdown.manufacturer],
+                          ['Medicine Name', scanResult.signal_breakdown.medicine_name ?? scanResult.signal_breakdown.ocr],
+                          ['Image Analysis', scanResult.signal_breakdown.image_analysis ?? scanResult.signal_breakdown.visual],
+                          ...(scanResult.signal_breakdown.barcode !== null && scanResult.signal_breakdown.barcode !== undefined
+                            ? [['Barcode Verification', scanResult.signal_breakdown.barcode]] : [])
+                        ].filter(([, v]) => v !== null && v !== undefined).map(([label, value]) => (
                           <div className="signal-card" key={label}>
                             <div className="flex justify-between">
                               <span>{label}</span>
-                              <strong>{value}%</strong>
+                              <strong style={{ color: value >= 80 ? '#16a34a' : value >= 50 ? '#d97706' : '#dc2626' }}>{value}%</strong>
                             </div>
                             <div className="signal-track">
                               <motion.div
                                 initial={{ width: 0 }}
                                 animate={{ width: `${value}%` }}
                                 transition={{ duration: 0.55, ease: [0.16, 1, 0.3, 1] }}
+                                style={{ background: value >= 80 ? '#16a34a' : value >= 50 ? '#d97706' : '#dc2626' }}
                               ></motion.div>
                             </div>
                           </div>
                         ))}
 
+                        {/* ── Barcode Status Card ─────────────────────────── */}
+                        {scanResult.barcode_status && (
+                          <div className={`barcode-status-card ${
+                            scanResult.barcode_status.required === false ? 'neutral'
+                              : scanResult.barcode_status.match === true ? 'success'
+                              : 'danger'
+                          }`}>
+                            <div className="barcode-status-header">
+                              <span className="barcode-icon">▐██▌</span>
+                              <strong>Barcode</strong>
+                              <span className={`barcode-chip ${
+                                scanResult.barcode_status.required === false ? 'chip-neutral'
+                                  : scanResult.barcode_status.match === true ? 'chip-success'
+                                  : 'chip-danger'
+                              }`}>
+                                {scanResult.barcode_status.required === false ? 'Not Required'
+                                  : scanResult.barcode_status.match === true ? 'Verified'
+                                  : scanResult.barcode_status.found ? 'Value Mismatch' : 'Not Found'}
+                              </span>
+                            </div>
+                            <p className="barcode-note">{scanResult.barcode_status.note}</p>
+                            {scanResult.barcode_status.decoded_value && (
+                              <div className="barcode-values">
+                                <div><span>Decoded:</span><code>{scanResult.barcode_status.decoded_value}</code></div>
+                                <div><span>Expected:</span><code>{scanResult.barcode_status.stored_value}</code></div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* ── Image Analysis Card ─────────────────────────── */}
+                        {scanResult.image_analysis && (
+                          <div className={`image-analysis-card ${
+                            (scanResult.image_analysis.score || 0) >= 80 ? 'good'
+                              : (scanResult.image_analysis.score || 0) >= 55 ? 'warn' : 'bad'
+                          }`}>
+                            <div className="flex justify-between items-center mb-1">
+                              <strong style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#6b7280' }}>Image Analysis</strong>
+                              <span style={{ fontWeight: 700, fontSize: '12px', color: (scanResult.image_analysis.score || 0) >= 80 ? '#16a34a' : (scanResult.image_analysis.score || 0) >= 55 ? '#d97706' : '#dc2626' }}>
+                                {scanResult.image_analysis.score}%
+                              </span>
+                            </div>
+                            {scanResult.image_analysis.anomalies?.length > 0 ? (
+                              <ul className="image-anomaly-list">
+                                {scanResult.image_analysis.anomalies.map((a, i) => (
+                                  <li key={i}>{a}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p className="image-ok-note">✓ No visual anomalies detected</p>
+                            )}
+                          </div>
+                        )}
+
                         <div className={`recommendation-card ${scanResult.verdict}`}>
                           <strong>
-                            {scanResult.verdict === 'verified' ? 'Approved for distribution' : 'DO NOT DISPENSE - REPORT TO CDSCO'}
+                            {scanResult.verdict === 'verified' ? '✓ Verified Genuine — Approved for distribution' : scanResult.verdict === 'caution' ? '⚠ Caution — Investigate before dispensing' : '✗ High Risk Counterfeit — DO NOT DISPENSE'}
                           </strong>
                           <span>
                             {scanResult.verdict === 'verified'
-                              ? 'All blister packaging layout specs match reference standards.'
-                              : `The scan has triggered warnings: ${scanResult.anomalies?.join(', ') || 'Visual print bleed / QR mismatch.'}`}
+                              ? 'All database fields match genuine batch records. Medicine is safe to dispense.'
+                              : `${scanResult.anomalies?.slice(0, 2).join(' • ') || 'Verification failed.'}`}
                           </span>
                         </div>
                       </div>
