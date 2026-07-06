@@ -1079,31 +1079,22 @@ export default function App() {
                         <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
                           
                           {/* Image preview with absolute overlay bounding box alerts */}
-                          <div className="md:col-span-5 relative border border-[#E4E8EE] rounded-lg overflow-hidden max-h-64 flex items-center justify-center">
-                            <img src={previewUrl} alt="Blister scan" className="max-h-full object-contain" />
-                            
-                            {/* Overlay highlights */}
-                            {scanResult.verdict !== 'verified' ? (
-                              <>
+                          {/* Image preview with absolute overlay bounding box alerts */}
+                          <div className="md:col-span-5 border border-[#E4E8EE] rounded-lg overflow-hidden max-h-64 flex items-center justify-center">
+                            <div className="relative inline-block max-h-full">
+                              <img src={previewUrl} alt="Blister scan" className="max-h-full w-auto object-contain block" />
+                              
+                              {/* Overlay highlights */}
+                              {scanResult.ocr_extracted?.ocr_boxes?.map((box, idx) => (
                                 <div 
-                                  className="box-highlight absolute" 
-                                  style={{ top: '60%', left: '20%', width: '40%', height: '12%' }}
-                                  onMouseEnter={() => setHoveredBox('Visual layout offset detected.')}
+                                  key={idx}
+                                  className={scanResult.verdict !== 'verified' ? "box-highlight absolute" : "box-highlight-success absolute"} 
+                                  style={{ top: `${box.y}%`, left: `${box.x}%`, width: `${box.w}%`, height: `${box.h}%` }}
+                                  onMouseEnter={() => setHoveredBox(`Detected Text: ${box.text}`)}
                                   onMouseLeave={() => setHoveredBox(null)}
                                 ></div>
-                                <div 
-                                  className="box-highlight absolute" 
-                                  style={{ top: '35%', left: '50%', width: '38%', height: '10%' }}
-                                  onMouseEnter={() => setHoveredBox('Invalid serial code encoding.')}
-                                  onMouseLeave={() => setHoveredBox(null)}
-                                ></div>
-                              </>
-                            ) : (
-                              <div 
-                                className="box-highlight-success absolute" 
-                                  style={{ top: '15%', left: '20%', width: '48%', height: '10%' }}
-                              ></div>
-                            )}
+                              ))}
+                            </div>
                           </div>
 
                           {/* 12-point clinical report checklist table */}
@@ -1560,11 +1551,17 @@ export default function App() {
                     </div>
 
                     <div className="report-grid">
-                      <div className="inspection-preview">
-                        <img src={previewUrl} alt="Visual inspect" />
-                        {scanResult.verdict !== 'verified' && (
-                          <div className="box-highlight absolute" style={{ top: '55%', left: '25%', width: '45%', height: '15%' }}></div>
-                        )}
+                      <div className="inspection-preview flex items-center justify-center">
+                        <div className="relative inline-block max-h-full">
+                          <img src={previewUrl} alt="Visual inspect" className="max-h-full w-auto object-contain block" />
+                          {scanResult.ocr_extracted?.ocr_boxes?.map((box, idx) => (
+                            <div 
+                              key={idx}
+                              className={scanResult.verdict !== 'verified' ? "box-highlight absolute" : "box-highlight-success absolute"} 
+                              style={{ top: `${box.y}%`, left: `${box.x}%`, width: `${box.w}%`, height: `${box.h}%` }}
+                            ></div>
+                          ))}
+                        </div>
                       </div>
 
                       <div className="signal-stack">
@@ -1798,11 +1795,17 @@ export default function App() {
                         </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-                          <div className="md:col-span-5 relative border border-[#E4E8EE] rounded-lg overflow-hidden max-h-64 flex items-center justify-center">
-                            <img src={previewUrl} alt="Visual inspect" className="max-h-full object-contain" />
-                            {scanResult.verdict !== 'verified' && (
-                              <div className="box-highlight absolute" style={{ top: '55%', left: '25%', width: '45%', height: '15%' }}></div>
-                            )}
+                          <div className="md:col-span-5 border border-[#E4E8EE] rounded-lg overflow-hidden max-h-64 flex items-center justify-center">
+                            <div className="relative inline-block max-h-full">
+                              <img src={previewUrl} alt="Visual inspect" className="max-h-full w-auto object-contain block" />
+                              {scanResult.ocr_extracted?.ocr_boxes?.map((box, idx) => (
+                                <div 
+                                  key={idx}
+                                  className={scanResult.verdict !== 'verified' ? "box-highlight absolute" : "box-highlight-success absolute"} 
+                                  style={{ top: `${box.y}%`, left: `${box.x}%`, width: `${box.w}%`, height: `${box.h}%` }}
+                                ></div>
+                              ))}
+                            </div>
                           </div>
                           
                           <div className="md:col-span-7 space-y-4 text-xs font-mono">
