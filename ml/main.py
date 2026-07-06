@@ -331,30 +331,56 @@ def analyze_visual_quality(img, expected_colors_json):
 def lookup_medicine(extracted_name, lines, full_text, conn):
     """Find the best matching medicine in the DB using fuzzy text matching."""
     cur = conn.cursor()
-    cur.execute("""
-        SELECT id, name, generic_name, manufacturer_name, approved_batch_format,
-               composition, expected_colors, barcode_required
-        FROM medicines
-    """)
-    medicines = [dict(r) for r in cur.fetchall()]
+    candidates = []
+
+    # 1. First Pass: Try finding by extracted name prefix/substring (fast index scan)
+    if extracted_name and len(extracted_name) > 2:
+        search_term = f"{extracted_name.strip()}%"
+        cur.execute("""
+            SELECT id, name, generic_name, manufacturer_name, approved_batch_format,
+                   composition, expected_colors, barcode_required, dosage_form, primary_strength, therapeutic_class
+            FROM medicines
+            WHERE brand_name LIKE ? OR brand_name LIKE ? LIMIT 100
+        """, (search_term, f"%{extracted_name.strip()}%"))
+        candidates.extend([dict(r) for r in cur.fetchall()])
+
+    # 2. If no strong candidates, extract possible words and query DB
+    if not candidates:
+        words = set()
+        for line in lines:
+            for w in line.split():
+                clean_w = re.sub(r'[^A-Za-z0-9]', '', w)
+                if len(clean_w) > 4:
+                    words.add(clean_w.lower())
+        
+        longest_words = sorted(list(words), key=len, reverse=True)[:5]
+        for w in longest_words:
+            cur.execute("""
+                SELECT id, name, generic_name, manufacturer_name, approved_batch_format,
+                       composition, expected_colors, barcode_required, dosage_form, primary_strength, therapeutic_class
+                FROM medicines
+                WHERE brand_name LIKE ? LIMIT 20
+            """, (f"{w}%",))
+            candidates.extend([dict(r) for r in cur.fetchall()])
+            
+    # Deduplicate candidates
+    unique_candidates = {c["id"]: c for c in candidates}.values()
 
     best_med = None
     best_score = 0.0
 
-    # First pass: exact substring match in full_text
-    for med in medicines:
+    # 3. Apply exact and fuzzy matching on the reduced candidate set
+    for med in unique_candidates:
         if med["name"].lower() in full_text.lower():
-            ratio = 0.95
-            if ratio > best_score:
-                best_score = ratio
+            if 0.95 > best_score:
+                best_score = 0.95
                 best_med = med
 
-    # Second pass: fuzzy line-by-line
     if best_score < 0.7:
         for line in lines:
             if len(line) < 3:
                 continue
-            for med in medicines:
+            for med in unique_candidates:
                 ratio = difflib.SequenceMatcher(None, line.lower(), med["name"].lower()).ratio()
                 if ratio > best_score:
                     best_score = ratio
@@ -378,7 +404,7 @@ def lookup_batch(medicine_id, batch_number, conn):
 
 # ─── Field Comparison ─────────────────────────────────────────────────────────
 
-def compare_fields(extracted, batch_row, medicine):
+def compare_fields(extracted, batch_row, medicine, full_text=""):
     """Compare every extracted OCR field against the stored batch / medicine record.
     Returns a dict of field comparison results.
     """
@@ -462,6 +488,23 @@ def compare_fields(extracted, batch_row, medicine):
     else:
         match = ext_lic.upper().replace(" ", "") == stored_lic.upper().replace(" ", "")
         results["license_number"] = make_result(ext_lic, stored_lic, match)
+
+    # ── Dosage Form & Strength ──
+    stored_dosage = (medicine.get("dosage_form") or "") if medicine else ""
+    if stored_dosage:
+        if stored_dosage.lower() in full_text.lower():
+            results["dosage_form"] = make_result("Present in OCR", stored_dosage, True)
+        else:
+            results["dosage_form"] = make_result("Not detected", stored_dosage, False, "Dosage form not found in OCR text")
+
+    stored_strength = (medicine.get("primary_strength") or "") if medicine else ""
+    if stored_strength:
+        # Check if numeric part of strength is in text
+        m = re.search(r'(\d+)', stored_strength)
+        if m and m.group(1) in full_text:
+            results["primary_strength"] = make_result(f"Found {m.group(1)}", stored_strength, True)
+        else:
+            results["primary_strength"] = make_result("Not detected", stored_strength, False, "Primary strength not found in OCR text")
 
     return results
 
@@ -730,7 +773,7 @@ def run_full_pipeline(scan_id, file_path):
 
         # ── Stage 6: Field Comparison ───────────────────────────────────────
         if matched_medicine:
-            field_comparisons = compare_fields(fields, batch_row, matched_medicine)
+            field_comparisons = compare_fields(fields, batch_row, matched_medicine, full_text)
         else:
             # All fields fail if medicine not identified
             field_comparisons = {

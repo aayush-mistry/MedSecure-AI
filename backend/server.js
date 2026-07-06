@@ -170,9 +170,9 @@ fastify.get('/api/v1/medicines/search', async (request) => {
   const q = request.query.q;
   if (!q) return [];
   const results = await query.all(
-    `SELECT id, name, generic_name, manufacturer_name, composition, expected_colors, approved_batch_format, barcode_required
-     FROM medicines WHERE name LIKE ? OR generic_name LIKE ? OR manufacturer_name LIKE ? OR composition LIKE ? LIMIT 20`,
-    [`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`]
+    `SELECT id, name, generic_name, manufacturer_name, composition, expected_colors, approved_batch_format, barcode_required, dosage_form, pack_size, pack_unit, price_inr, primary_strength, therapeutic_class
+     FROM medicines WHERE brand_name LIKE ? OR primary_ingredient LIKE ? OR manufacturer LIKE ? LIMIT 20`,
+    [`%${q}%`, `%${q}%`, `%${q}%`]
   );
   return results.map(r => ({
     ...r,
