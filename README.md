@@ -174,7 +174,7 @@ cd backend
 npm install
 npm start
 ```
-*Note: A SQLite file `medsecure.db` will be initialized in the backend directory upon launch.*
+*Note: A SQLite file `medsecure.db` will be initialized in the root `db` directory upon launch.*
 
 #### 4. Frontend React Web App Setup
 ```bash

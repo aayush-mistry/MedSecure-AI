@@ -7,10 +7,9 @@ services:
       - PORT=3001
       - JWT_SECRET=medsecure-docker-secret-2026
       - ML_SERVICE_URL=http://ml:8000
-      - DB_PATH=./medsecure.db
     volumes:
       - backend_data:/app/uploads
-      - backend_db:/app
+      - medsecure_db:/db
     restart: unless-stopped
 
   ml:
@@ -18,7 +17,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - backend_db:/app/backend
+      - medsecure_db:/db
     restart: unless-stopped
 
   frontend:
@@ -31,4 +30,4 @@ services:
 
 volumes:
   backend_data:
-  backend_db:
+  medsecure_db:

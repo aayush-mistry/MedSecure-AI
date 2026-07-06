@@ -33,7 +33,7 @@ print("Loading EasyOCR model (CPU)...")
 reader = easyocr.Reader(['en'], gpu=False, verbose=False)
 print("EasyOCR ready.")
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend", "medsecure.db"))
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "db", "medsecure.db"))
 
 # In-memory progress store for async scan processing
 scan_progress_store = {}
