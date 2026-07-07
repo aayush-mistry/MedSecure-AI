@@ -118,9 +118,17 @@ export default function App() {
 
   // Timeline process steps list
   const timelineSteps = [
-    "Image Upload", "OCR Extraction", "Barcode Validation", "QR Validation", 
-    "Packaging Analysis", "Manufacturer Validation", "CDSCO Verification", "AI Risk Analysis", "Final Decision"
+    "Image Quality Check", "Image Enhancement", "OCR Extraction", "Database Verification", 
+    "Batch Verification", "Barcode Verification", "AI Packaging Analysis", "Logo Verification", 
+    "Color Verification", "Layout Verification", "Tamper Detection", "Confidence Scoring"
   ];
+  const totalPipelineSteps = timelineSteps.length;
+  const currentStepLabel = timelineSteps[Math.min(Math.max(scanStep, 0), totalPipelineSteps - 1)];
+  const clampPipelineStep = (step) => {
+    const numericStep = Number(step);
+    if (!Number.isFinite(numericStep)) return 0;
+    return Math.min(Math.max(numericStep, 0), totalPipelineSteps - 1);
+  };
 
   // Auto authenticate client on mount
   useEffect(() => {
@@ -431,7 +439,7 @@ export default function App() {
         try {
           const msg = JSON.parse(event.data);
           if (msg.status === 'stage') {
-            setScanStep(msg.stageIndex);
+            setScanStep(clampPipelineStep(msg.stageIndex));
           } else if (msg.status === 'completed') {
             const finalData = {
               ...msg.data,
@@ -447,6 +455,11 @@ export default function App() {
 
             // Set alternatives suggestion
             fetchAlternatives(finalData.medicine_id);
+          } else if (msg.status === 'error') {
+            showToast('Scan failed: ' + (msg.error || 'Unknown error'), 'error');
+            setIsScanning(false);
+            clearInterval(stepInterval);
+            ws.close();
           }
         } catch (e) {
           console.error("WS message error", e);
@@ -1035,7 +1048,7 @@ export default function App() {
                           {isScanning ? (
                             <>
                               <Loader2 className="w-4 h-4 animate-spin" />
-                              <span>Forensic Pipeline active: Step {scanStep + 1}/9 ({timelineSteps[scanStep]})</span>
+                              <span>Forensic Pipeline active: Step {scanStep + 1}/{totalPipelineSteps} ({currentStepLabel})</span>
                             </>
                           ) : (
                             <>
@@ -1522,7 +1535,7 @@ export default function App() {
                     <div className="panel-title-row">
                       <div>
                         <span className="panel-eyebrow">Live processing timeline</span>
-                        <h4>{isScanning ? `Step ${scanStep + 1}/9 - ${timelineSteps[scanStep]}` : 'Pipeline completed'}</h4>
+                        <h4>{isScanning ? `Step ${scanStep + 1}/${totalPipelineSteps} - ${currentStepLabel}` : 'Pipeline completed'}</h4>
                       </div>
                       {isScanning && <Loader2 className="w-5 h-5 animate-spin text-[#0284c7]" />}
                     </div>

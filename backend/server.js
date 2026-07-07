@@ -36,6 +36,7 @@ await fastify.register(fastifyStatic, {
 });
 
 const wsClients = new Map();
+const scanMessageCache = new Map();
 const generateId = () => Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 
 // ─── Zod validation schemas ───────────────────────────────────────────────────
@@ -105,6 +106,10 @@ fastify.register(async function (fastify) {
           }
           wsClients.get(currentScanId).push(socket);
           socket.send(JSON.stringify({ status: 'subscribed', scanId: currentScanId }));
+          const cachedMessage = scanMessageCache.get(currentScanId);
+          if (cachedMessage) {
+            socket.send(JSON.stringify(cachedMessage));
+          }
         }
       } catch (err) {
         console.error('WS parse error:', err.message);
@@ -292,6 +297,10 @@ fastify.post('/api/v1/scans', { preHandler: optionalAuth }, async (request, repl
 });
 
 function sendWs(scanId, msg) {
+  scanMessageCache.set(scanId, msg);
+  if (msg.status === 'completed' || msg.status === 'error') {
+    setTimeout(() => scanMessageCache.delete(scanId), 5 * 60 * 1000);
+  }
   if (wsClients.has(scanId)) {
     wsClients.get(scanId).forEach(s => { try { s.send(JSON.stringify(msg)); } catch (e) {} });
   }
@@ -355,16 +364,16 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
         anomalies=?, signal_breakdown=?, scanned_at=CURRENT_TIMESTAMP
        WHERE id=?`,
       [
-        result.medicine_id,
+        result.medicine_id || null,
         result.batch_id || null,
         result.authenticity_score,
         verdict,
-        JSON.stringify(result.ocr_extracted),
+        JSON.stringify(result.ocr_extracted || {}),
         JSON.stringify(result.db_match_results || {}),
         JSON.stringify(result.image_analysis || {}),
         JSON.stringify(result.barcode_status || {}),
-        JSON.stringify(result.anomalies),
-        JSON.stringify(result.signal_breakdown),
+        JSON.stringify(result.anomalies || []),
+        JSON.stringify(result.breakdown || result.signal_breakdown || {}),
         scanId
       ]
     );

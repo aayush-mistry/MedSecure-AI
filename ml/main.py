@@ -193,15 +193,31 @@ def verify_batch(medicine_id, batch_number, conn):
 
 # --- Stage 6: Barcode Verification ---
 def verify_barcode(img, batch_row, med_row):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    barcodes = zbar_decode(gray)
-    decoded = [b.data.decode("utf-8") for b in barcodes]
-    
     req = False
     if batch_row and batch_row.get("barcode_required"): req = True
     if med_row and med_row.get("barcode_required"): req = True
-    
-    if not req: return {"status": "skipped", "reason": "Barcode Not required", "score": 100}
+
+    if not req:
+        return {"status": "skipped", "reason": "Barcode not required", "score": 100}
+
+    if not HAS_ZBAR:
+        return {"status": "failed", "reason": "Barcode decoder unavailable", "score": 0}
+
+    h, w = img.shape[:2]
+    max_dim = max(h, w)
+    scan_img = img
+    if max_dim > 1200:
+        scale = 1200 / max_dim
+        scan_img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+    gray = cv2.cvtColor(scan_img, cv2.COLOR_BGR2GRAY)
+    try:
+        barcodes = zbar_decode(gray)
+        decoded = [b.data.decode("utf-8") for b in barcodes]
+    except Exception as e:
+        print(f"Barcode decoding failed: {e}")
+        decoded = []
+
     if not decoded: return {"status": "failed", "reason": "Barcode required but not found", "score": 0}
     
     expected = (batch_row.get("barcode_value") or "") if batch_row else ""
@@ -221,7 +237,8 @@ def analyze_packaging(img):
 # --- Stage 8: Logo Verification ---
 def verify_logo(img, med_row):
     # Mock SIFT feature matching against expected logo embeddings
-    if med_row and med_row.get("manufacturer_name", "").lower() in ["gsk", "dr. reddy's", "pfizer"]:
+    mfg_name = med_row.get("manufacturer_name") if med_row else None
+    if mfg_name and mfg_name.lower() in ["gsk", "dr. reddy's", "pfizer"]:
         return {"status": "passed", "reason": "Logo Verified", "score": 95}
     return {"status": "warning", "reason": "Logo matched (fallback)", "score": 80}
 
@@ -382,8 +399,9 @@ def run_full_pipeline(scan_id, file_path):
             """, (scan_id, med_row["id"] if med_row else None, fields["batch_number"], final_report["score"], 
                   final_report["verdict"].lower().replace(' ', '_'), json.dumps(anomalies), int(time.time()*1000)))
             conn.commit()
-        except sqlite3.OperationalError:
-            # Fallback if scans table doesn't exist yet
+        except sqlite3.Error as e:
+            # Fallback if scans table doesn't exist yet or if id already exists
+            print(f"DB Insert failed: {e}")
             pass
 
         with scan_progress_lock:
@@ -394,7 +412,7 @@ def run_full_pipeline(scan_id, file_path):
                     "verdict": final_report["verdict"],
                     "authenticity_score": final_report["score"],
                     "medicine_name": brand_nm,
-                    "manufacturer_name": med_row.get("manufacturer_name", fields["manufacturer"]) if med_row else fields["manufacturer"],
+                    "manufacturer_name": (med_row.get("manufacturer_name") or fields["manufacturer"]) if med_row else fields["manufacturer"],
                     "batch_number": fields["batch_number"],
                     "explanation": final_report["explanation"],
                     "anomalies": anomalies,
@@ -408,14 +426,14 @@ def run_full_pipeline(scan_id, file_path):
         with scan_progress_lock:
             scan_progress_store[scan_id] = {"status": "error", "error": str(e)}
 
-@app.post("/api/scan/upload")
+@app.post("/process_scan")
 async def upload_scan(req: ScanRequest):
     scan_id = req.scan_id
     set_progress(scan_id, "queued", -1, 0.0)
     threading.Thread(target=run_full_pipeline, args=(scan_id, req.file_path), daemon=True).start()
     return {"scan_id": scan_id, "status": "processing"}
 
-@app.get("/api/scan/{scan_id}/progress")
+@app.get("/scan_progress/{scan_id}")
 async def get_scan_progress(scan_id: str):
     with scan_progress_lock:
         if scan_id not in scan_progress_store:
