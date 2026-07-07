@@ -798,28 +798,41 @@ export default function App() {
                 
                 {/* Search result popup */}
                 {showSearchDropdown && navSearchResults.length > 0 && (
-                  <div className="absolute top-10 left-0 right-0 bg-white border border-[#E4E8EE] rounded-xl shadow-lg p-2 z-50 text-xs space-y-1">
-                    <div className="flex justify-between items-center text-[10px] uppercase font-mono font-bold text-[#6B7280] px-2 pb-1 border-b border-[#F5F7FA]">
-                      <span>CDSCO Search results</span>
-                      <button onClick={() => setShowSearchDropdown(false)}><X className="w-3 h-3 text-[#9CA3AF]" /></button>
-                    </div>
-                    {navSearchResults.map((res, i) => (
-                      <div 
-                        key={i} 
-                        onClick={() => {
-                          setTableSearch(res.name);
-                          setCurrentView('history');
-                          setShowSearchDropdown(false);
-                        }}
-                        className="p-2 hover:bg-[#EEF2F6] rounded-lg cursor-pointer flex justify-between items-center"
-                      >
-                        <div>
-                          <strong className="text-[#111827] font-semibold">{res.name}</strong>
-                          <span className="text-[#6B7280] block text-[10px]">{res.generic_name} â€¢ {res.manufacturer_name || res.manufacturer}</span>
-                        </div>
-                        <span className="px-2 py-0.5 bg-[#22C55E]/10 text-[#22C55E] rounded font-bold text-[9px] uppercase font-mono">Registered</span>
+                  <div className="absolute top-12 left-0 w-80 bg-white/80 backdrop-blur-xl border border-white/40 shadow-2xl rounded-2xl overflow-hidden z-50 text-xs animate-in fade-in zoom-in-95 duration-200">
+                    <div className="bg-gradient-to-r from-[#2563EB]/10 to-[#8B5CF6]/10 px-4 py-3 flex justify-between items-center border-b border-white/50 backdrop-blur-md">
+                      <div className="flex items-center gap-2">
+                        <div className="w-2 h-2 rounded-full bg-[#2563EB] animate-pulse"></div>
+                        <span className="text-[10px] uppercase font-mono font-bold bg-clip-text text-transparent bg-gradient-to-r from-[#2563EB] to-[#8B5CF6]">CDSCO Search Results</span>
                       </div>
-                    ))}
+                      <button onClick={() => setShowSearchDropdown(false)} className="p-1 rounded-full hover:bg-black/5 transition-colors">
+                        <X className="w-3.5 h-3.5 text-[#6B7280]" />
+                      </button>
+                    </div>
+                    <div className="p-2 space-y-1 max-h-64 overflow-y-auto custom-scrollbar">
+                      {navSearchResults.map((res, i) => (
+                        <div 
+                          key={i} 
+                          onClick={() => {
+                            setTableSearch(res.name);
+                            setCurrentView('history');
+                            setShowSearchDropdown(false);
+                          }}
+                          className="group p-3 hover:bg-gradient-to-r hover:from-[#F8FAFC] hover:to-[#F1F5F9] rounded-xl cursor-pointer flex justify-between items-center transition-all duration-300 border border-transparent hover:border-[#E2E8F0] hover:shadow-sm"
+                        >
+                          <div className="flex flex-col gap-0.5">
+                            <strong className="text-[#0F172A] font-bold text-[13px] group-hover:text-[#2563EB] transition-colors">{res.name}</strong>
+                            <span className="text-[#64748B] block text-[10.5px] font-medium">{res.generic_name}</span>
+                            <span className="text-[#94A3B8] block text-[9px] uppercase tracking-wide">{res.manufacturer_name || res.manufacturer}</span>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            <span className="px-2.5 py-1 bg-gradient-to-r from-[#22C55E]/10 to-[#16A34A]/10 text-[#16A34A] rounded-md font-bold text-[9px] uppercase font-mono border border-[#22C55E]/20 shadow-[0_0_10px_rgba(34,197,94,0.1)] group-hover:shadow-[0_0_15px_rgba(34,197,94,0.2)] transition-shadow">
+                              Registered
+                            </span>
+                            <span className="text-[9px] text-[#CBD5E1] group-hover:text-[#94A3B8] transition-colors">View Match &rarr;</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
