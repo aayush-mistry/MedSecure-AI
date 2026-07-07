@@ -393,6 +393,8 @@ export default function App() {
     setIsScanning(true);
     setScanStep(0);
 
+    let wsCompleted = false;
+
     // Initial local timeline steps animation (while uploading)
     const stepInterval = setInterval(() => {
       setScanStep(prev => {
@@ -403,6 +405,12 @@ export default function App() {
         return prev + 1;
       });
     }, 400);
+    let scanWatchdog = null;
+
+    const stopScanTimers = () => {
+      clearInterval(stepInterval);
+      if (scanWatchdog) clearTimeout(scanWatchdog);
+    };
 
     try {
       const formData = new FormData();
@@ -433,6 +441,14 @@ export default function App() {
 
       ws.onopen = () => {
         ws.send(JSON.stringify({ action: 'join', scanId }));
+        scanWatchdog = setTimeout(() => {
+          if (!wsCompleted) {
+            ws.close();
+            setIsScanning(false);
+            stopScanTimers();
+            showToast('Live scan timed out waiting for ML progress. Check backend/ML logs.', 'error');
+          }
+        }, 70000);
       };
 
       ws.onmessage = (event) => {
@@ -449,7 +465,8 @@ export default function App() {
             setScanHistory(prev => [finalData, ...prev]);
             setSelectedReportScan(finalData);
             setIsScanning(false);
-            clearInterval(stepInterval);
+            wsCompleted = true;
+            stopScanTimers();
             ws.close();
             showToast('Inspection report generated from live pipeline.', 'success');
 
@@ -458,7 +475,8 @@ export default function App() {
           } else if (msg.status === 'error') {
             showToast('Scan failed: ' + (msg.error || 'Unknown error'), 'error');
             setIsScanning(false);
-            clearInterval(stepInterval);
+            wsCompleted = true;
+            stopScanTimers();
             ws.close();
           }
         } catch (e) {
@@ -468,11 +486,22 @@ export default function App() {
 
       ws.onerror = (e) => {
         console.error("WS error, running fallback simulation...", e);
+        wsCompleted = true;
+        stopScanTimers();
         runScanSimulation();
+      };
+
+      ws.onclose = () => {
+        if (!wsCompleted) {
+          setIsScanning(false);
+          stopScanTimers();
+          showToast('Live scan connection closed before completion.', 'error');
+        }
       };
 
     } catch (err) {
       console.warn("Scan upload error, starting fallback simulation...", err.message);
+      stopScanTimers();
       runScanSimulation();
     }
   };

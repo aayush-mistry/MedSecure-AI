@@ -279,8 +279,9 @@ fastify.post('/api/v1/scans', { preHandler: optionalAuth }, async (request, repl
   const writeStream = fs.createWriteStream(filePath);
   await new Promise((resolve, reject) => {
     data.file.pipe(writeStream);
-    data.file.on('end', resolve);
     data.file.on('error', reject);
+    writeStream.on('finish', resolve);
+    writeStream.on('error', reject);
   });
 
   const relativeUrl = `/uploads/${fileName}`;
@@ -290,6 +291,15 @@ fastify.post('/api/v1/scans', { preHandler: optionalAuth }, async (request, repl
     'INSERT INTO scans (id, user_id, image_url, lat, lng) VALUES (?,?,?,?,?)',
     [scanId, userId, relativeUrl, lat, lng]
   );
+
+  sendWs(scanId, {
+    status: 'stage',
+    scanId,
+    stage: 'upload_received',
+    stageIndex: 0,
+    totalStages: 12,
+    progress: 0.02
+  });
 
   runMlPipeline(scanId, filePath, relativeUrl, lat, lng);
 
@@ -305,6 +315,14 @@ function sendWs(scanId, msg) {
     wsClients.get(scanId).forEach(s => { try { s.send(JSON.stringify(msg)); } catch (e) {} });
   }
 }
+
+fastify.get('/api/v1/scan-status/:id', async (request, reply) => {
+  const cachedMessage = scanMessageCache.get(request.params.id);
+  if (!cachedMessage) {
+    return reply.status(404).send({ error: 'No live status cached for this scan' });
+  }
+  return cachedMessage;
+});
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
