@@ -577,6 +577,9 @@ export default function App() {
 
         const verifiedData = {
           ...offlineResult,
+          analysis_status: 'demo',
+          analysis_mode: 'local_filename_simulation',
+          analysis_summary: 'Displayed from the local demo simulator because the live scan pipeline was unavailable.',
           image_url: previewUrl,
           lat: 28.6139,
           lng: 77.2090,
@@ -587,7 +590,7 @@ export default function App() {
         setScanHistory(prev => [verifiedData, ...prev]);
         setSelectedReportScan(verifiedData);
         setIsScanning(false);
-        showToast('Medicine packaging verification report generated locally.', 'success');
+        showToast('Live analysis unavailable. Showing clearly marked demo result.', 'warning');
         setAlternatives([{ name: 'Dolo 500', manufacturer: 'Micro Labs Ltd', score: 98 }]);
       }
     }, 300);
@@ -700,6 +703,22 @@ export default function App() {
 
   const totalPages = Math.ceil(filteredHistory.length / itemsPerPage);
   const scoreValue = Math.round(Number(scanResult?.authenticity_score || 0));
+  const analysisStatus = scanResult?.analysis_status || 'completed';
+  const isFallbackAnalysis = analysisStatus === 'fallback';
+  const isDemoAnalysis = analysisStatus === 'demo';
+  const isRealAnalysis = !scanResult || analysisStatus === 'completed';
+  const analysisNoticeTitle = isFallbackAnalysis
+    ? 'Live analysis unavailable'
+    : isDemoAnalysis
+      ? 'Demo result shown'
+      : 'Live ML analysis completed';
+  const analysisNoticeText = scanResult?.analysis_summary || (
+    isFallbackAnalysis
+      ? 'The system returned a fallback score because the ML service did not complete.'
+      : isDemoAnalysis
+        ? 'This result came from the local simulator, not image inference.'
+        : 'The result was produced by the live ML inference pipeline.'
+  );
   const scoreGradient = scanResult
     ? `conic-gradient(${
         scanResult.verdict === 'verified'
@@ -1084,6 +1103,15 @@ export default function App() {
                     {/* Forensic Verification Report Details */}
                     {scanResult && (
                       <div className="bg-white border border-[#E4E8EE] rounded-xl p-6 space-y-6">
+                        <div className={`p-3 rounded-lg border text-xs font-semibold ${
+                          isRealAnalysis
+                            ? 'bg-[#22C55E]/5 border-[#22C55E]/20 text-[#166534]'
+                            : 'bg-[#F59E0B]/10 border-[#F59E0B]/30 text-[#92400E]'
+                        }`}>
+                          <strong className="block uppercase tracking-wider">{analysisNoticeTitle}</strong>
+                          <span>{analysisNoticeText}</span>
+                        </div>
+
                         <div className="flex justify-between items-center border-b border-[#E4E8EE] pb-4">
                           <div>
                             <h3 className="text-lg font-bold text-[#111827]">AI Forensic Analysis Report</h3>
@@ -1205,10 +1233,10 @@ export default function App() {
                           scanResult.verdict === 'verified' ? 'bg-[#22C55E]/5 border-[#22C55E]/20 text-[#22C55E]' : 'bg-[#EF4444]/5 border-[#EF4444]/20 text-[#EF4444]'
                         }`}>
                           <strong className="block uppercase text-sm mb-1">
-                            Recommendation: {scanResult.verdict === 'verified' ? 'Approved for distribution' : 'DO NOT DISPENSE - REPORT TO CDSCO'}
+                            Recommendation: {!isRealAnalysis ? 'Manual review required' : scanResult.verdict === 'verified' ? 'Approved for distribution' : 'DO NOT DISPENSE - REPORT TO CDSCO'}
                           </strong>
                           {scanResult.verdict === 'verified' 
-                            ? 'All blister packaging layout specs match reference standards.' 
+                            ? (isRealAnalysis ? 'All blister packaging layout specs match reference standards.' : 'This result is not a completed live analysis and should not be used as an authenticity decision.')
                             : `The scan has triggered warnings: ${scanResult.anomalies?.join(', ') || 'Visual print bleed / QR mismatch.'}`}
                         </div>
                       </div>
@@ -1576,6 +1604,15 @@ export default function App() {
                       </span>
                     </div>
 
+                    <div className={`p-3 rounded-lg border text-xs font-semibold ${
+                      isRealAnalysis
+                        ? 'bg-[#22C55E]/5 border-[#22C55E]/20 text-[#166534]'
+                        : 'bg-[#F59E0B]/10 border-[#F59E0B]/30 text-[#92400E]'
+                    }`}>
+                      <strong className="block uppercase tracking-wider">{analysisNoticeTitle}</strong>
+                      <span>{analysisNoticeText}</span>
+                    </div>
+
                     <div className="report-grid">
                       <div className="inspection-preview flex items-center justify-center">
                         <div className="relative inline-block max-h-full">
@@ -1725,10 +1762,12 @@ export default function App() {
 
                         <div className={`recommendation-card ${scanResult.verdict}`}>
                           <strong>
-                            {scanResult.verdict === 'verified' ? '✓ Verified Genuine — Approved for distribution' : scanResult.verdict === 'caution' ? '⚠ Caution — Investigate before dispensing' : '✗ High Risk Counterfeit — DO NOT DISPENSE'}
+                            {!isRealAnalysis ? 'Live analysis incomplete - manual review required' : scanResult.verdict === 'verified' ? '✓ Verified Genuine — Approved for distribution' : scanResult.verdict === 'caution' ? '⚠ Caution — Investigate before dispensing' : '✗ High Risk Counterfeit — DO NOT DISPENSE'}
                           </strong>
                           <span>
-                            {scanResult.verdict === 'verified'
+                            {!isRealAnalysis
+                              ? 'This result was not produced by completed live image inference. Re-run the scan when the ML service is available.'
+                              : scanResult.verdict === 'verified'
                               ? 'All database fields match genuine batch records. Medicine is safe to dispense.'
                               : `${scanResult.anomalies?.slice(0, 2).join(' • ') || 'Verification failed.'}`}
                           </span>

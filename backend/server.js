@@ -306,26 +306,73 @@ function sendWs(scanId, msg) {
   }
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function startMlScan(scanId, filePath) {
+  const payload = JSON.stringify({ scan_id: scanId, file_path: filePath });
+  const options = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payload
+  };
+  const endpoints = ['/process_scan', '/api/scan/upload'];
+
+  for (const endpoint of endpoints) {
+    const response = await fetchWithTimeout(`${ML_SERVICE_URL}${endpoint}`, options, 10000);
+    if (response.ok) return response;
+    if (response.status !== 404) {
+      throw new Error(`ML pipeline failed to start at ${endpoint}, status ${response.status}`);
+    }
+  }
+
+  throw new Error('ML pipeline failed to start: no compatible upload endpoint found');
+}
+
+async function fetchMlProgress(scanId) {
+  const endpoints = [`/scan_progress/${scanId}`, `/api/scan/${scanId}/progress`];
+
+  for (const endpoint of endpoints) {
+    const response = await fetchWithTimeout(`${ML_SERVICE_URL}${endpoint}`, {}, 5000);
+    if (response.ok) return response;
+    if (response.status !== 404) {
+      throw new Error(`ML progress endpoint ${endpoint} returned status ${response.status}`);
+    }
+  }
+
+  return null;
+}
+
 async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
   try {
     // 1. Start async ML pipeline
-    const startRes = await fetch(`${ML_SERVICE_URL}/process_scan`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scan_id: scanId, file_path: filePath })
-    });
-    if (!startRes.ok) throw new Error(`ML pipeline failed to start, status ${startRes.status}`);
+    await startMlScan(scanId, filePath);
 
     // 2. Poll progress and send real-time stage updates via WebSocket
     let lastStage = -1;
     let result = null;
+    let missingProgressPolls = 0;
     const maxPolls = 120; // 60 second timeout
 
     for (let i = 0; i < maxPolls; i++) {
       await new Promise(r => setTimeout(r, 500));
 
-      const progRes = await fetch(`${ML_SERVICE_URL}/scan_progress/${scanId}`);
-      if (!progRes.ok) continue;
+      const progRes = await fetchMlProgress(scanId);
+      if (!progRes) {
+        missingProgressPolls += 1;
+        if (missingProgressPolls >= 10) {
+          throw new Error('ML accepted scan but no progress endpoint returned this scan ID');
+        }
+        continue;
+      }
+      missingProgressPolls = 0;
 
       const progress = await progRes.json();
 
@@ -407,6 +454,9 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
         image_url: relativeUrl,
         authenticity_score: result.authenticity_score,
         verdict,
+        analysis_status: 'completed',
+        analysis_mode: 'ml_pipeline',
+        analysis_summary: 'Completed by the live ML inference pipeline.',
         ocr_extracted: result.ocr_extracted,
         db_match_results: result.db_match_results,
         image_analysis: result.image_analysis,
@@ -415,7 +465,8 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
         signal_breakdown: result.signal_breakdown,
         medicine_id: result.medicine_id,
         batch_id: result.batch_id,
-        medicine_name: result.ocr_extracted?.name,
+        medicine_name: result.medicine_name || result.ocr_extracted?.name,
+        manufacturer_name: result.manufacturer_name,
         lat,
         lng
       }
@@ -440,6 +491,9 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
         id: scanId,
         authenticity_score: 50,
         verdict: 'caution',
+        analysis_status: 'fallback',
+        analysis_mode: 'backend_fallback',
+        analysis_summary: `Live ML analysis did not complete: ${err.message}`,
         ocr_extracted: {},
         db_match_results: {},
         image_analysis: {},

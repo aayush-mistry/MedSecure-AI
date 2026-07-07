@@ -17,6 +17,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      - backend_data:/app/uploads
       - medsecure_db:/db
     restart: unless-stopped
 

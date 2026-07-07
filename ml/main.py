@@ -6,6 +6,7 @@ import threading
 import sqlite3
 import difflib
 import ssl
+import multiprocessing as mp
 import numpy as np
 import cv2
 from PIL import Image
@@ -63,8 +64,9 @@ class ProgressResponse(BaseModel):
     status: str
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=2.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 2000")
     return conn
 
 def set_progress(scan_id, stage, stage_index, progress, status="processing"):
@@ -192,16 +194,47 @@ def verify_batch(medicine_id, batch_number, conn):
         return None
 
 # --- Stage 6: Barcode Verification ---
+def decode_barcodes_worker(gray, queue):
+    try:
+        barcodes = zbar_decode(gray)
+        queue.put([b.data.decode("utf-8", errors="ignore") for b in barcodes])
+    except Exception as e:
+        queue.put({"error": str(e)})
+
+def decode_barcodes_with_timeout(gray, timeout_seconds=2.0):
+    try:
+        ctx = mp.get_context("fork")
+    except ValueError:
+        return [], "Timed barcode decoding is unavailable on this platform"
+
+    queue = ctx.Queue()
+    proc = ctx.Process(target=decode_barcodes_worker, args=(gray, queue))
+    proc.start()
+    proc.join(timeout_seconds)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(1)
+        return None, "Barcode decoder timed out"
+
+    if queue.empty():
+        return [], None
+
+    result = queue.get()
+    if isinstance(result, dict) and result.get("error"):
+        return [], result["error"]
+    return result, None
+
 def verify_barcode(img, batch_row, med_row):
     req = False
     if batch_row and batch_row.get("barcode_required"): req = True
     if med_row and med_row.get("barcode_required"): req = True
 
     if not req:
-        return {"status": "skipped", "reason": "Barcode not required", "score": 100}
+        return {"status": "skipped", "required": False, "found": False, "match": None, "note": "Barcode not required", "reason": "Barcode not required", "score": 100}
 
     if not HAS_ZBAR:
-        return {"status": "failed", "reason": "Barcode decoder unavailable", "score": 0}
+        return {"status": "failed", "required": True, "found": False, "match": False, "note": "Barcode decoder unavailable", "reason": "Barcode decoder unavailable", "score": 0}
 
     h, w = img.shape[:2]
     max_dim = max(h, w)
@@ -211,19 +244,18 @@ def verify_barcode(img, batch_row, med_row):
         scan_img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
     gray = cv2.cvtColor(scan_img, cv2.COLOR_BGR2GRAY)
-    try:
-        barcodes = zbar_decode(gray)
-        decoded = [b.data.decode("utf-8") for b in barcodes]
-    except Exception as e:
-        print(f"Barcode decoding failed: {e}")
-        decoded = []
+    decoded, decode_error = decode_barcodes_with_timeout(gray)
+    if decode_error:
+        print(f"Barcode decoding skipped: {decode_error}")
+        return {"status": "failed", "required": True, "found": False, "match": False, "note": decode_error, "reason": decode_error, "score": 0}
 
-    if not decoded: return {"status": "failed", "reason": "Barcode required but not found", "score": 0}
+    if not decoded:
+        return {"status": "failed", "required": True, "found": False, "match": False, "note": "Barcode required but not found", "reason": "Barcode required but not found", "score": 0}
     
     expected = (batch_row.get("barcode_value") or "") if batch_row else ""
     if expected in decoded:
-        return {"status": "passed", "reason": "Barcode Verified", "score": 100}
-    return {"status": "failed", "reason": "Barcode Mismatch", "score": 0}
+        return {"status": "passed", "required": True, "found": True, "match": True, "decoded_value": decoded[0], "stored_value": expected, "note": "Barcode verified", "reason": "Barcode Verified", "score": 100}
+    return {"status": "failed", "required": True, "found": True, "match": False, "decoded_value": decoded[0], "stored_value": expected, "note": "Barcode mismatch", "reason": "Barcode Mismatch", "score": 0}
 
 # --- Stage 7: AI Packaging ---
 def analyze_packaging(img):
@@ -411,12 +443,30 @@ def run_full_pipeline(scan_id, file_path):
                 "result": {
                     "verdict": final_report["verdict"],
                     "authenticity_score": final_report["score"],
+                    "medicine_id": med_row["id"] if med_row else None,
+                    "batch_id": batch_row["id"] if batch_row else None,
                     "medicine_name": brand_nm,
                     "manufacturer_name": (med_row.get("manufacturer_name") or fields["manufacturer"]) if med_row else fields["manufacturer"],
                     "batch_number": fields["batch_number"],
+                    "ocr_extracted": fields,
+                    "db_match_results": {
+                        "medicine_name": {
+                            "extracted": brand_nm,
+                            "stored": brand_nm if med_row else None,
+                            "match": bool(med_row)
+                        },
+                        "batch_number": {
+                            "extracted": fields["batch_number"],
+                            "stored": batch_row.get("batch_number") if batch_row else None,
+                            "match": bool(batch_row)
+                        }
+                    },
+                    "image_analysis": res_packaging,
+                    "barcode_status": res_barcode,
                     "explanation": final_report["explanation"],
                     "anomalies": anomalies,
-                    "breakdown": final_report["breakdown"]
+                    "breakdown": final_report["breakdown"],
+                    "signal_breakdown": final_report["breakdown"]
                 }
             }
 
@@ -427,6 +477,7 @@ def run_full_pipeline(scan_id, file_path):
             scan_progress_store[scan_id] = {"status": "error", "error": str(e)}
 
 @app.post("/process_scan")
+@app.post("/api/scan/upload")
 async def upload_scan(req: ScanRequest):
     scan_id = req.scan_id
     set_progress(scan_id, "queued", -1, 0.0)
@@ -434,6 +485,7 @@ async def upload_scan(req: ScanRequest):
     return {"scan_id": scan_id, "status": "processing"}
 
 @app.get("/scan_progress/{scan_id}")
+@app.get("/api/scan/{scan_id}/progress")
 async def get_scan_progress(scan_id: str):
     with scan_progress_lock:
         if scan_id not in scan_progress_store:
