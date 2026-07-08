@@ -77,6 +77,8 @@ def set_progress(scan_id, stage, stage_index, progress, status="processing"):
             "scan_id": scan_id, "stage": stage, "stage_index": stage_index,
             "total_stages": len(STAGES), "progress": progress, "status": status
         }
+    if stage_index >= 0:
+        time.sleep(0.15)
 
 # --- Stage 1: Image Quality Assessment ---
 def resize_max_dimension(img, max_dimension):
@@ -134,57 +136,151 @@ def prepare_ocr_image(img):
     return clahe.apply(gray)
 
 # --- Stage 3: OCR Extraction ---
+NOT_DETECTED = "Not Detected"
+MEDICINE_MATCH_THRESHOLD = 0.78
+
 def normalize_date(date_str):
-    if not date_str: return ""
+    if not date_str or date_str == NOT_DETECTED: return NOT_DETECTED
     m = re.match(r'^(\d{2})[/-](\d{4})$', date_str.strip())
     if m: return f"{m.group(1)}/{m.group(2)}"
     m = re.match(r'^(\d{2})[/-](\d{2})$', date_str.strip())
     if m: return f"{m.group(1)}/20{m.group(2)}"
     return date_str.strip()
 
+def is_detected(value):
+    return bool(value and str(value).strip() and str(value).strip() != NOT_DETECTED)
+
+def clean_ocr_text(value):
+    return re.sub(r"\s+", " ", value or "").strip(" :;-")
+
+def normalize_match_text(value):
+    value = (value or "").lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+def field_result(value=NOT_DETECTED, confidence=0.0, source="ocr"):
+    value = clean_ocr_text(value)
+    return {
+        "value": value if value else NOT_DETECTED,
+        "confidence": round(float(confidence or 0.0), 3),
+        "source": source
+    }
+
+def best_regex_match(ocr_results, pattern, group=1, normalizer=None, min_conf=0.25):
+    best = field_result()
+    for result in ocr_results:
+        text = result[1].strip() if len(result) >= 2 else ""
+        conf = float(result[2]) if len(result) >= 3 else 0.0
+        if conf < min_conf:
+            continue
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        value = match.group(group).strip()
+        if normalizer:
+            value = normalizer(value)
+        if conf > best["confidence"]:
+            best = field_result(value, conf)
+    return best
+
+def confidence_for_value(ocr_results, value):
+    if not is_detected(value):
+        return 0.0
+    normalized_value = normalize_match_text(value)
+    best = 0.0
+    for result in ocr_results:
+        text = result[1].strip() if len(result) >= 2 else ""
+        conf = float(result[2]) if len(result) >= 3 else 0.0
+        normalized_text = normalize_match_text(text)
+        if normalized_value and (normalized_value in normalized_text or normalized_text in normalized_value):
+            best = max(best, conf)
+    return best
+
 def extract_ocr_fields(ocr_results):
     lines = [r[1].strip() for r in ocr_results if len(r[1].strip()) >= 2]
     full_text = " ".join(lines)
-    fields = {}
-    best_text = ""
-    best_conf = 0
+    field_details = {
+        "name": field_result(),
+        "manufacturer": field_result(),
+        "batch_number": field_result(),
+        "mfg_date": field_result(),
+        "expiry_date": field_result(),
+        "mrp": field_result(),
+        "strength": field_result(),
+        "dosage_form": field_result(),
+        "composition": field_result(),
+        "license_number": field_result(),
+        "barcode": field_result()
+    }
+
+    ignored_name_terms = {
+        "mfg", "mfd", "batch", "b no", "exp", "expiry", "mrp", "price",
+        "license", "lic", "tablet", "capsule", "strip", "schedule"
+    }
+    best_name = field_result()
     for result in ocr_results:
         text = result[1].strip() if len(result) >= 2 else ""
+        conf = float(result[2]) if len(result) >= 3 else 0.0
         lower = text.lower()
-        if len(result) >= 3 and result[2] > best_conf and not any(k in lower for k in ["mfg", "batch", "exp", "mrp", "license"]):
-            best_text = text
-            best_conf = result[2]
-    fields["name"] = best_text
+        looks_like_name = (
+            conf >= 0.35
+            and len(text) >= 3
+            and any(ch.isalpha() for ch in text)
+            and not any(term in lower for term in ignored_name_terms)
+        )
+        if looks_like_name and conf > best_name["confidence"]:
+            best_name = field_result(text, conf)
+    field_details["name"] = best_name
 
-    bm = re.search(r'(?:batch\s*(?:no|number)?|b\.?\s*no\.?)\s*[:\-\.]*\s*([A-Z0-9][A-Z0-9\-/]{2,})', full_text, re.IGNORECASE)
-    fields["batch_number"] = bm.group(1).strip() if bm else ""
-    
-    exp = re.search(r'(?:exp|expiry)(?:\s*date)?\s*[:;\-\.]*\s*((?:\d{2})[/\-](?:\d{2,4}))', full_text, re.IGNORECASE)
-    fields["expiry_date"] = normalize_date(exp.group(1)) if exp else ""
-    
-    mfg = re.search(r'(?:mfg|mfd)(?:\s*date)?\s*[:;\-\.]*\s*((?:\d{2})[/\-](?:\d{2,4}))', full_text, re.IGNORECASE)
-    fields["mfg_date"] = normalize_date(mfg.group(1)) if mfg else ""
-    
-    mrp = re.search(r'(?:mrp|price)\s*[:;\-]*\s*(?:rs\.?)?\s*(\d+\.?\d*)', full_text, re.IGNORECASE)
-    fields["mrp"] = mrp.group(1) if mrp else ""
-    
-    lic = re.search(r'(?:mfg\.?\s*lic|lic\.?\s*no)\s*[:\-]*\s*([A-Z0-9/\-\.]{4,})', full_text, re.IGNORECASE)
-    fields["license_number"] = lic.group(1).strip() if lic else ""
-    
-    manufacturer = ""
+    field_details["batch_number"] = best_regex_match(
+        ocr_results,
+        r'(?:batch\s*(?:no|number)?|b\.?\s*no\.?)\s*[:\-\.]*\s*([A-Z0-9][A-Z0-9\-/]{2,})'
+    )
+    field_details["expiry_date"] = best_regex_match(
+        ocr_results,
+        r'(?:exp|expiry)(?:\s*date)?\s*[:;\-\.]*\s*((?:\d{1,2})[/\-](?:\d{2,4}))',
+        normalizer=normalize_date
+    )
+    field_details["mfg_date"] = best_regex_match(
+        ocr_results,
+        r'(?:mfg|mfd)(?:\s*date)?\s*[:;\-\.]*\s*((?:\d{1,2})[/\-](?:\d{2,4}))',
+        normalizer=normalize_date
+    )
+    field_details["mrp"] = best_regex_match(
+        ocr_results,
+        r'(?:mrp|price)\s*[:;\-]*\s*(?:rs\.?|inr|₹)?\s*(\d+\.?\d*)'
+    )
+    field_details["license_number"] = best_regex_match(
+        ocr_results,
+        r'(?:mfg\.?\s*lic|lic\.?\s*no|license)\s*[:\-]*\s*([A-Z0-9/\-\.]{4,})'
+    )
+    field_details["strength"] = best_regex_match(
+        ocr_results,
+        r'\b(\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|iu))\b'
+    )
+    field_details["dosage_form"] = best_regex_match(
+        ocr_results,
+        r'\b(tablets?|tabs?|capsules?|caps?|syrup|injection|cream|ointment|drops|inhaler)\b',
+        group=0
+    )
+
     for line in lines:
         mfr = re.search(r'(?:mfg\.?\s*by|manufactured\s*by)\s*[:\-]*\s*(.+)', line, re.IGNORECASE)
         if mfr:
             manufacturer = re.split(r'\b(?:batch|exp|expiry|mrp|mfg\s*date)\b', mfr.group(1), flags=re.IGNORECASE)[0].strip()
+            field_details["manufacturer"] = field_result(manufacturer[:80], confidence_for_value(ocr_results, line))
             break
-    if not manufacturer:
+    if not is_detected(field_details["manufacturer"]["value"]):
         mfr = re.search(r'(?:mfg\.?\s*by|manufactured\s*by)\s*[:\-]*\s*(.+?)(?=\s+(?:batch|exp|expiry|mrp|mfg\s*date)\b|$)', full_text, re.IGNORECASE)
-        manufacturer = mfr.group(1).strip() if mfr else ""
-    fields["manufacturer"] = manufacturer[:80]
-    
-    # Set default 'mfr' field so dictionary doesn't throw KeyError later
-    if "mfr" not in fields:
-        fields["mfr"] = fields["manufacturer"]
+        if mfr:
+            manufacturer = mfr.group(1).strip()
+            field_details["manufacturer"] = field_result(manufacturer[:80], confidence_for_value(ocr_results, manufacturer))
+
+    fields = {key: detail["value"] for key, detail in field_details.items()}
+    fields["mfr"] = fields["manufacturer"]
+    fields["_confidence"] = {key: detail["confidence"] for key, detail in field_details.items()}
+    fields["_details"] = field_details
+    fields["_raw_text"] = full_text
 
     return fields, full_text, lines
 
@@ -203,14 +299,14 @@ def medicine_manufacturer(med):
 
 def build_medicine_candidates(full_text, lines, conn):
     columns = get_table_columns(conn, "medicines")
-    searchable_columns = [c for c in ["brand_name", "name", "generic_name", "primary_ingredient"] if c in columns]
+    searchable_columns = [c for c in ["brand_name", "name", "generic_name", "primary_ingredient", "manufacturer_name"] if c in columns]
     if not searchable_columns:
         return []
 
     tokens = []
     for token in re.findall(r"[A-Za-z][A-Za-z0-9\-]{2,}", full_text):
         token = token.strip()
-        if len(token) >= 4 and token.lower() not in {"batch", "expiry", "mfg", "mfd", "tablet", "capsule"}:
+        if len(token) >= 4 and token.lower() not in {"batch", "expiry", "mfg", "mfd", "tablet", "capsule", "tablets", "capsules", "price", "license"}:
             tokens.append(token)
 
     seen = set()
@@ -233,12 +329,12 @@ def build_medicine_candidates(full_text, lines, conn):
 
     return candidates
 
-def verify_db_medicine(full_text, lines, conn):
+def verify_db_medicine(fields, full_text, lines, conn):
     cur = conn.cursor()
     try:
         cur.execute("SELECT * FROM medicines LIMIT 1")
     except sqlite3.OperationalError:
-        return None, 0.0
+        return None, 0.0, {"status": "skipped", "reason": "Medicine database unavailable"}
 
     all_meds = build_medicine_candidates(full_text, lines, conn)
     if not all_meds:
@@ -247,41 +343,64 @@ def verify_db_medicine(full_text, lines, conn):
     
     best_med = None
     best_score = 0.0
-    full_text_lower = full_text.lower()
+    full_text_norm = normalize_match_text(full_text)
+    name_norm = normalize_match_text(fields.get("name"))
+    manufacturer_norm = normalize_match_text(fields.get("manufacturer"))
+
     for med in all_meds:
-        brand = medicine_name(med).lower()
-        manufacturer = medicine_manufacturer(med).lower()
-        if brand and brand in full_text_lower:
-            score = 0.98
-            if manufacturer and manufacturer in full_text_lower:
-                score = 1.0
-            if score > best_score:
-                best_score = score; best_med = med
+        brand_norm = normalize_match_text(medicine_name(med))
+        generic_norm = normalize_match_text(med.get("generic_name") or "")
+        med_mfr_norm = normalize_match_text(medicine_manufacturer(med))
+        if not brand_norm:
+            continue
+
+        scores = []
+        if name_norm:
+            scores.append(difflib.SequenceMatcher(None, name_norm, brand_norm).ratio())
+            if name_norm == brand_norm:
+                scores.append(1.0)
+            elif brand_norm in name_norm or name_norm in brand_norm:
+                scores.append(0.94)
+        if brand_norm in full_text_norm:
+            scores.append(0.96)
         for line in lines:
-            if brand:
-                ratio = difflib.SequenceMatcher(None, line.lower(), brand).ratio()
-                if manufacturer and manufacturer in full_text_lower:
-                    ratio = min(1.0, ratio + 0.05)
-                if ratio > best_score and ratio > 0.7:
-                    best_score = ratio; best_med = med
-    
-    return best_med, best_score
+            line_norm = normalize_match_text(line)
+            if line_norm:
+                scores.append(difflib.SequenceMatcher(None, line_norm, brand_norm).ratio())
+
+        score = max(scores) if scores else 0.0
+        if generic_norm and generic_norm in full_text_norm:
+            score = min(1.0, score + 0.03)
+        if manufacturer_norm and med_mfr_norm:
+            mfr_score = difflib.SequenceMatcher(None, manufacturer_norm, med_mfr_norm).ratio()
+            if mfr_score >= 0.70 or manufacturer_norm in med_mfr_norm or med_mfr_norm in manufacturer_norm:
+                score = min(1.0, score + 0.04)
+
+        if score > best_score:
+            best_score = score
+            best_med = med
+
+    if not best_med or best_score < MEDICINE_MATCH_THRESHOLD:
+        return None, best_score, {
+            "status": "not_found",
+            "reason": "Medicine Not Found: OCR evidence did not meet confidence threshold"
+        }
+
+    return best_med, best_score, {
+        "status": "verified",
+        "reason": f"Medicine matched with {round(best_score * 100)}% confidence"
+    }
 
 # --- Stage 5: Batch Verification ---
 def verify_batch(medicine_id, batch_number, conn):
-    if not medicine_id or not batch_number: return None
+    if not is_detected(batch_number):
+        return None
     cur = conn.cursor()
     try:
-        row = cur.execute("SELECT * FROM medicine_batches WHERE medicine_id=? AND batch_number=?", (medicine_id, batch_number)).fetchone()
-        return dict(row) if row else None
-    except sqlite3.OperationalError:
-        return None
-
-def verify_batch_any_medicine(batch_number, conn):
-    if not batch_number:
-        return None
-    try:
-        row = conn.execute("SELECT * FROM medicine_batches WHERE batch_number=? LIMIT 1", (batch_number,)).fetchone()
+        if medicine_id:
+            row = cur.execute("SELECT * FROM medicine_batches WHERE medicine_id=? AND batch_number=?", (medicine_id, batch_number)).fetchone()
+        else:
+            row = cur.execute("SELECT * FROM medicine_batches WHERE batch_number=? LIMIT 1", (batch_number,)).fetchone()
         return dict(row) if row else None
     except sqlite3.OperationalError:
         return None
@@ -323,11 +442,8 @@ def verify_barcode(img, batch_row, med_row):
     if batch_row and batch_row.get("barcode_required"): req = True
     if med_row and med_row.get("barcode_required"): req = True
 
-    if not req:
-        return {"status": "skipped", "required": False, "found": False, "match": None, "note": "Barcode not required", "reason": "Barcode not required", "score": 100}
-
     if not HAS_ZBAR:
-        return {"status": "failed", "required": True, "found": False, "match": False, "note": "Barcode decoder unavailable", "reason": "Barcode decoder unavailable", "score": 0}
+        return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": "Barcode decoder unavailable", "reason": "Barcode verification skipped", "score": 85 if not req else 70}
 
     h, w = img.shape[:2]
     max_dim = max(h, w)
@@ -340,15 +456,17 @@ def verify_barcode(img, batch_row, med_row):
     decoded, decode_error = decode_barcodes_with_timeout(gray)
     if decode_error:
         print(f"Barcode decoding skipped: {decode_error}")
-        return {"status": "failed", "required": True, "found": False, "match": False, "note": decode_error, "reason": decode_error, "score": 0}
+        return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": decode_error, "reason": "Barcode verification skipped", "score": 85 if not req else 70}
 
     if not decoded:
-        return {"status": "failed", "required": True, "found": False, "match": False, "note": "Barcode required but not found", "reason": "Barcode required but not found", "score": 0}
+        return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": "Barcode not detected", "reason": "Barcode not detected; verification skipped", "score": 85 if not req else 70}
     
     expected = (batch_row.get("barcode_value") or "") if batch_row else ""
-    if expected in decoded:
-        return {"status": "passed", "required": True, "found": True, "match": True, "decoded_value": decoded[0], "stored_value": expected, "note": "Barcode verified", "reason": "Barcode Verified", "score": 100}
-    return {"status": "failed", "required": True, "found": True, "match": False, "decoded_value": decoded[0], "stored_value": expected, "note": "Barcode mismatch", "reason": "Barcode Mismatch", "score": 0}
+    if expected and expected in decoded:
+        return {"status": "passed", "required": req, "found": True, "match": True, "ocr_value": decoded[0], "decoded_value": decoded[0], "stored_value": expected, "note": "Barcode verified", "reason": "Barcode Verified", "score": 100}
+    if expected:
+        return {"status": "failed", "required": req, "found": True, "match": False, "ocr_value": decoded[0], "decoded_value": decoded[0], "stored_value": expected, "note": "Barcode mismatch", "reason": "Barcode Mismatch", "score": 0}
+    return {"status": "skipped", "required": req, "found": True, "match": None, "ocr_value": decoded[0], "decoded_value": decoded[0], "stored_value": None, "note": "Barcode decoded but no database barcode value is recorded", "reason": "Barcode database comparison skipped", "score": 90}
 
 # --- Stage 7: AI Packaging ---
 def analyze_packaging(img):
@@ -399,42 +517,146 @@ def detect_tampering(img):
     return {"status": "passed", "reason": "No physical tamper detected", "score": 100}
 
 # --- Stage 12: Explainable AI Engine ---
-def generate_explainable_report(stages_results):
+def db_value(row, *keys):
+    if not row:
+        return None
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+def compare_values(ocr_value, db_value_text, label=None):
+    if not is_detected(ocr_value):
+        return {
+            "extracted": NOT_DETECTED,
+            "stored": db_value_text or None,
+            "match": None,
+            "status": "Skipped",
+            "note": f"{label or 'Field'} not detected by OCR"
+        }
+    if not db_value_text:
+        return {
+            "extracted": ocr_value,
+            "stored": None,
+            "match": None,
+            "status": "No Database Record",
+            "note": "No reference value available for comparison"
+        }
+    ocr_norm = normalize_match_text(normalize_date(ocr_value))
+    db_norm = normalize_match_text(normalize_date(db_value_text))
+    match = bool(ocr_norm and db_norm and (ocr_norm == db_norm or ocr_norm in db_norm or db_norm in ocr_norm))
+    return {
+        "extracted": ocr_value,
+        "stored": db_value_text,
+        "match": match,
+        "status": "Verified" if match else "Mismatch",
+        "note": None if match else "OCR value differs from database reference"
+    }
+
+def compare_fuzzy(ocr_value, db_value_text, label=None, threshold=0.75):
+    if not is_detected(ocr_value):
+        return {
+            "extracted": NOT_DETECTED,
+            "stored": db_value_text or None,
+            "match": None,
+            "status": "Skipped",
+            "note": f"{label or 'Field'} not detected by OCR"
+        }
+    if not db_value_text:
+        return {
+            "extracted": ocr_value,
+            "stored": None,
+            "match": None,
+            "status": "No Database Record",
+            "note": "No reference value available for comparison"
+        }
+    ocr_norm = normalize_match_text(ocr_value)
+    db_norm = normalize_match_text(db_value_text)
+    ratio = difflib.SequenceMatcher(None, ocr_norm, db_norm).ratio()
+    match = ratio >= threshold or ocr_norm in db_norm or db_norm in ocr_norm
+    return {
+        "extracted": ocr_value,
+        "stored": db_value_text,
+        "match": match,
+        "status": "Verified" if match else "Mismatch",
+        "confidence": round(ratio, 3),
+        "note": None if match else "OCR value differs from database reference"
+    }
+
+def build_verification_results(fields, med_row, batch_row, barcode_status):
+    composition = None
+    if med_row:
+        try:
+            raw_composition = med_row.get("composition")
+            parsed = json.loads(raw_composition) if raw_composition else []
+            composition = ", ".join(parsed) if isinstance(parsed, list) else str(parsed)
+        except Exception:
+            composition = med_row.get("composition")
+
+    dosage_status = "Skipped"
+    dosage_note = "Dosage form not detected by OCR"
+    if is_detected(fields.get("dosage_form")) and (med_row or batch_row):
+        dosage_status = "Reference Only"
+        dosage_note = "No direct dosage-form reference is available for a strict match"
+
+    return {
+        "medicine_name": compare_fuzzy(fields.get("name"), medicine_name(med_row) if med_row else None, "Medicine Name", 0.78),
+        "generic_name": {
+            "extracted": NOT_DETECTED,
+            "stored": db_value(med_row, "generic_name"),
+            "match": None,
+            "status": "Reference Only" if med_row else "Skipped",
+            "note": "Generic name is a database reference for the matched medicine; it is not OCR evidence."
+        },
+        "manufacturer": compare_fuzzy(fields.get("manufacturer"), medicine_manufacturer(med_row) if med_row else db_value(batch_row, "manufacturer"), "Manufacturer", 0.70),
+        "batch_number": compare_values(fields.get("batch_number"), db_value(batch_row, "batch_number"), "Batch Number"),
+        "manufacturing_date": compare_values(fields.get("mfg_date"), db_value(batch_row, "manufacturing_date"), "Manufacturing Date"),
+        "expiry_date": compare_values(fields.get("expiry_date"), db_value(batch_row, "expiry_date"), "Expiry Date"),
+        "mrp": compare_values(fields.get("mrp"), db_value(batch_row, "mrp"), "MRP"),
+        "strength": compare_fuzzy(fields.get("strength"), composition, "Strength", 0.65),
+        "dosage_form": {
+            "extracted": fields.get("dosage_form", NOT_DETECTED),
+            "stored": db_value(med_row, "dosage_form") or db_value(batch_row, "pack_type"),
+            "match": None,
+            "status": dosage_status,
+            "note": dosage_note
+        },
+        "composition": compare_fuzzy(fields.get("composition"), composition, "Composition", 0.65),
+        "license_number": compare_values(fields.get("license_number"), db_value(batch_row, "manufacturing_license") or db_value(med_row, "cdsco_license"), "License Number"),
+        "barcode": {
+            "extracted": barcode_status.get("ocr_value") or barcode_status.get("decoded_value") or NOT_DETECTED,
+            "stored": barcode_status.get("stored_value"),
+            "match": barcode_status.get("match"),
+            "status": "Verified" if barcode_status.get("match") is True else ("Mismatch" if barcode_status.get("match") is False else "Skipped"),
+            "note": barcode_status.get("note")
+        }
+    }
+
+def generate_evidence_report(stages_results):
     score = 0
     weights = {
-        "ocr": 0.15, "db": 0.15, "batch": 0.20, "barcode": 0.05, 
-        "packaging": 0.10, "logo": 0.05, "color": 0.10, "layout": 0.10, "tamper": 0.10
+        "ocr": 0.12, "db": 0.18, "batch": 0.18, "barcode": 0.08,
+        "packaging": 0.12, "logo": 0.08, "color": 0.08, "layout": 0.08, "tamper": 0.08
     }
-    
-    report = []
-    
-    def add_line(name, res):
-        nonlocal score
-        w = weights[name]
-        s = res["score"]
-        score += s * w
-        
-        icon = "✓" if s > 80 else ("⚠" if s > 50 else "✗")
-        report.append(f"{icon} {res['reason']}")
 
-    add_line("ocr", stages_results["ocr"])
-    add_line("db", stages_results["db"])
-    add_line("batch", stages_results["batch"])
-    add_line("barcode", stages_results["barcode"])
-    add_line("packaging", stages_results["packaging"])
-    add_line("logo", stages_results["logo"])
-    add_line("color", stages_results["color"])
-    add_line("layout", stages_results["layout"])
-    add_line("tamper", stages_results["tamper"])
-    
+    explanation = []
+    breakdown = {}
+    for name, weight in weights.items():
+        result = stages_results[name]
+        stage_score = float(result.get("score", 0))
+        score += stage_score * weight
+        breakdown[name] = round(stage_score, 1)
+        marker = "OK" if stage_score >= 85 else ("WARN" if stage_score >= 60 else "FAIL")
+        explanation.append(f"{marker}: {result.get('reason', name)}")
+
     final_score = min(100, max(0, round(score, 1)))
-    verdict = "Verified Genuine" if final_score > 85 else ("Caution" if final_score > 60 else "Counterfeit / High Risk")
-    
     return {
         "score": final_score,
-        "verdict": verdict,
-        "explanation": report,
-        "breakdown": {k: v["score"] for k, v in stages_results.items()}
+        "confidence": "High" if final_score >= 85 else ("Medium" if final_score >= 60 else "Low"),
+        "verdict": "Verified Genuine" if final_score > 85 else ("Caution" if final_score > 60 else "Counterfeit / High Risk"),
+        "explanation": explanation,
+        "breakdown": breakdown
     }
 
 
@@ -471,33 +693,38 @@ def run_full_pipeline(scan_id, file_path):
             width_ths=0.8
         )
         fields, full_text, lines = extract_ocr_fields(ocr_res)
-        
-        ocr_score = 100 if fields["batch_number"] and fields["mfr"] else (50 if fields["batch_number"] else 20)
-        res_ocr = {"score": ocr_score, "reason": "OCR Extracted Core Fields" if ocr_score > 50 else "Missing text fields in OCR"}
+        ocr_public = {k: v for k, v in fields.items() if not k.startswith("_") and k != "mfr"}
+        detected_core_fields = [
+            fields.get("name"), fields.get("manufacturer"), fields.get("batch_number"),
+            fields.get("expiry_date"), fields.get("mfg_date"), fields.get("mrp")
+        ]
+        detected_count = sum(1 for value in detected_core_fields if is_detected(value))
+        ocr_score = min(100, 35 + detected_count * 10 + int(np.mean(list(fields["_confidence"].values()) or [0]) * 20))
+        res_ocr = {
+            "score": ocr_score,
+            "reason": f"OCR extracted {detected_count}/{len(detected_core_fields)} core fields"
+        }
 
         conn = get_db()
 
         # Stage 4
         set_progress(scan_id, "db_verification", 3, 0.30)
-        med_row, db_score = verify_db_medicine(full_text, lines, conn)
-        brand_nm = med_row.get("brand_name") or med_row.get("name") if med_row else "None"
-        res_db = {"score": db_score * 100, "reason": f"Medicine Name Matched ({brand_nm})"}
+        med_row, db_score, med_match_meta = verify_db_medicine(fields, full_text, lines, conn)
+        brand_nm = medicine_name(med_row) if med_row else "Medicine Not Found"
+        res_db = {
+            "score": round(db_score * 100, 1) if med_row else max(0, round(db_score * 60, 1)),
+            "reason": med_match_meta["reason"]
+        }
         
         # Stage 5
         set_progress(scan_id, "batch_verification", 4, 0.40)
         batch_row = verify_batch(med_row["id"] if med_row else None, fields["batch_number"], conn)
-        if not batch_row:
-            batch_row = verify_batch_any_medicine(fields["batch_number"], conn)
-            if batch_row and (not med_row or batch_row.get("medicine_id") != med_row.get("id")):
-                try:
-                    med = conn.execute("SELECT * FROM medicines WHERE id=? LIMIT 1", (batch_row["medicine_id"],)).fetchone()
-                    med_row = dict(med) if med else None
-                    brand_nm = medicine_name(med_row) if med_row else brand_nm
-                    if med_row:
-                        res_db = {"score": 90, "reason": f"Medicine inferred from verified batch ({brand_nm})"}
-                except sqlite3.Error:
-                    pass
-        res_batch = {"score": 100 if batch_row else 0, "reason": "Batch Number Verified" if batch_row else "Batch NOT found in registry"}
+        if not is_detected(fields["batch_number"]):
+            res_batch = {"score": 85, "reason": "Batch number not detected; batch verification skipped"}
+        elif batch_row:
+            res_batch = {"score": 100, "reason": "Batch number found in registry"}
+        else:
+            res_batch = {"score": 45, "reason": "OCR batch number not found in registry"}
 
         # Stage 6
         set_progress(scan_id, "barcode_verification", 5, 0.50)
@@ -531,10 +758,20 @@ def run_full_pipeline(scan_id, file_path):
             "layout": res_layout, "tamper": res_tamper
         }
         
-        final_report = generate_explainable_report(stages_results)
+        verification_results = build_verification_results(fields, med_row, batch_row, res_barcode)
+        verified_count = sum(1 for result in verification_results.values() if result.get("match") is True)
+        mismatch_count = sum(1 for result in verification_results.values() if result.get("match") is False)
+        skipped_count = sum(1 for result in verification_results.values() if result.get("status") == "Skipped")
+        if mismatch_count:
+            stages_results["db"]["score"] = min(stages_results["db"]["score"], max(35, 90 - mismatch_count * 20))
+            stages_results["db"]["reason"] = f"{mismatch_count} database comparison mismatch(es) found"
+        elif verified_count:
+            stages_results["db"]["reason"] = f"{verified_count} database field(s) verified; {skipped_count} skipped"
+
+        final_report = generate_evidence_report(stages_results)
 
         # Extract anomalies for legacy compatibility in DB
-        anomalies = [line for line in final_report["explanation"] if line.startswith("✗") or line.startswith("⚠")]
+        anomalies = [line for line in final_report["explanation"] if line.startswith("FAIL") or line.startswith("WARN")]
 
         # Write result
         cur = conn.cursor()
@@ -542,7 +779,7 @@ def run_full_pipeline(scan_id, file_path):
             cur.execute("""
                 INSERT INTO scans (id, medicine_id, batch_number, authenticity_score, verdict, anomalies_json, scanned_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (scan_id, med_row["id"] if med_row else None, fields["batch_number"], final_report["score"], 
+            """, (scan_id, med_row["id"] if med_row else None, fields["batch_number"] if is_detected(fields["batch_number"]) else None, final_report["score"], 
                   final_report["verdict"].lower().replace(' ', '_'), json.dumps(anomalies), int(time.time()*1000)))
             conn.commit()
         except sqlite3.Error as e:
@@ -556,25 +793,18 @@ def run_full_pipeline(scan_id, file_path):
                 "progress": 1.0,
                 "result": {
                     "verdict": final_report["verdict"],
+                    "confidence": final_report["confidence"],
                     "authenticity_score": final_report["score"],
                     "medicine_id": med_row["id"] if med_row else None,
                     "batch_id": batch_row["id"] if batch_row else None,
                     "medicine_name": brand_nm,
-                    "manufacturer_name": (med_row.get("manufacturer_name") or fields["manufacturer"]) if med_row else fields["manufacturer"],
-                    "batch_number": fields["batch_number"],
-                    "ocr_extracted": fields,
-                    "db_match_results": {
-                        "medicine_name": {
-                            "extracted": brand_nm,
-                            "stored": brand_nm if med_row else None,
-                            "match": bool(med_row)
-                        },
-                        "batch_number": {
-                            "extracted": fields["batch_number"],
-                            "stored": batch_row.get("batch_number") if batch_row else None,
-                            "match": bool(batch_row)
-                        }
-                    },
+                    "generic_name": med_row.get("generic_name") if med_row else None,
+                    "manufacturer_name": med_row.get("manufacturer_name") if med_row else (fields["manufacturer"] if is_detected(fields["manufacturer"]) else None),
+                    "batch_number": fields["batch_number"] if is_detected(fields["batch_number"]) else NOT_DETECTED,
+                    "ocr_extracted": ocr_public,
+                    "ocr_field_details": fields["_details"],
+                    "raw_ocr_text": fields["_raw_text"],
+                    "db_match_results": verification_results,
                     "image_analysis": res_packaging,
                     "barcode_status": res_barcode,
                     "explanation": final_report["explanation"],
@@ -613,3 +843,4 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

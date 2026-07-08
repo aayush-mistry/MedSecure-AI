@@ -70,10 +70,7 @@ export default function App() {
   });
 
   // Alerts Feed
-  const [alertsFeed, setAlertsFeed] = useState([
-    { id: 'alt-1', medicine_name: 'Crocin 650', generic_name: 'Paracetamol', manufacturer_name: 'GlaxoSmithKline', batch_number: 'INVALID-999-BATCH', report_count: 14, severity: 'high', last_updated: '2026-06-25T12:00:00Z' },
-    { id: 'alt-2', medicine_name: 'Omez 20', generic_name: 'Omeprazole', manufacturer_name: "Dr. Reddy's Laboratories", batch_number: 'MC8872', report_count: 4, severity: 'caution', last_updated: '2026-06-25T10:15:00Z' }
-  ]);
+  const [alertsFeed, setAlertsFeed] = useState([]);
 
   // Community Alert Form State
   const [communityReportForm, setCommunityReportForm] = useState({
@@ -281,6 +278,16 @@ export default function App() {
     return `${base}${url}`;
   };
 
+  const displayValue = (value, fallback = 'Not Detected') => {
+    if (value === null || value === undefined || value === '') return fallback;
+    return value;
+  };
+
+  const scoreValueOrZero = (value) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+  };
+
   // Fetch scan history from real database
   const fetchScanHistory = async () => {
     try {
@@ -294,19 +301,10 @@ export default function App() {
           setSelectedReportScan(data[0]);
         }
       } else {
-        // Fallback default
-        setScanHistory([
-          { id: 'scan-1', medicine_name: 'Calpol 500', generic_name: 'Paracetamol', manufacturer_name: 'GlaxoSmithKline', verdict: 'verified', authenticity_score: 98, scanned_at: '2026-06-25T12:00:00Z', hospital: 'Apollo Hospitals' },
-          { id: 'scan-2', medicine_name: 'Crocin 650', generic_name: 'Paracetamol', manufacturer_name: 'GlaxoSmithKline', verdict: 'counterfeit', authenticity_score: 41, scanned_at: '2026-06-25T11:30:00Z', hospital: 'Apollo Hospitals' },
-          { id: 'scan-3', medicine_name: 'Omez 20', generic_name: 'Omeprazole', manufacturer_name: "Dr. Reddy's Laboratories", verdict: 'caution', authenticity_score: 72, scanned_at: '2026-06-25T10:15:00Z', hospital: 'Max Healthcare' }
-        ]);
+        setScanHistory([]);
       }
     } catch (err) {
-      setScanHistory([
-        { id: 'scan-1', medicine_name: 'Calpol 500', generic_name: 'Paracetamol', manufacturer_name: 'GlaxoSmithKline', verdict: 'verified', authenticity_score: 98, scanned_at: '2026-06-25T12:00:00Z', hospital: 'Apollo Hospitals' },
-        { id: 'scan-2', medicine_name: 'Crocin 650', generic_name: 'Paracetamol', manufacturer_name: 'GlaxoSmithKline', verdict: 'counterfeit', authenticity_score: 41, scanned_at: '2026-06-25T11:30:00Z', hospital: 'Apollo Hospitals' },
-        { id: 'scan-3', medicine_name: 'Omez 20', generic_name: 'Omeprazole', manufacturer_name: "Dr. Reddy's Laboratories", verdict: 'caution', authenticity_score: 72, scanned_at: '2026-06-25T10:15:00Z', hospital: 'Max Healthcare' }
-      ]);
+      setScanHistory([]);
     }
   };
 
@@ -360,21 +358,11 @@ export default function App() {
         setNavSearchResults(data);
         setShowSearchDropdown(true);
       } else {
-        const mockedAlts = [
-          { name: "Calpol 500", generic_name: "Paracetamol", manufacturer_name: "GSK", cdsco_license: "MFG/CDSCO/10014" },
-          { name: "Crocin 650", generic_name: "Paracetamol", manufacturer_name: "GSK", cdsco_license: "MFG/CDSCO/10013" },
-          { name: "Omez 20", generic_name: "Omeprazole", manufacturer_name: "Dr. Reddy's", cdsco_license: "MFG/CDSCO/10020" }
-        ].filter(item => item.name.toLowerCase().includes(val.toLowerCase()));
-        setNavSearchResults(mockedAlts);
+        setNavSearchResults([]);
         setShowSearchDropdown(true);
       }
     } catch (err) {
-      const mockedAlts = [
-        { name: "Calpol 500", generic_name: "Paracetamol", manufacturer_name: "GSK", cdsco_license: "MFG/CDSCO/10014" },
-        { name: "Crocin 650", generic_name: "Paracetamol", manufacturer_name: "GSK", cdsco_license: "MFG/CDSCO/10013" },
-        { name: "Omez 20", generic_name: "Omeprazole", manufacturer_name: "Dr. Reddy's", cdsco_license: "MFG/CDSCO/10020" }
-      ].filter(item => item.name.toLowerCase().includes(val.toLowerCase()));
-      setNavSearchResults(mockedAlts);
+      setNavSearchResults([]);
       setShowSearchDropdown(true);
     }
   };
@@ -528,82 +516,35 @@ export default function App() {
       if (stepCount >= 8) {
         clearInterval(interval);
         
-        let offlineResult = null;
-        const filename = uploadFile.name.toLowerCase();
-
-        if (filename.includes('calpol')) {
-          offlineResult = {
-            id: 'scan-1092',
-            medicine_id: "med-calpol",
-            medicine_name: "Calpol 500",
-            generic_name: "Paracetamol",
-            manufacturer_name: "GlaxoSmithKline Pharmaceuticals",
-            authenticity_score: 98.7,
-            verdict: "verified",
-            hospital: "Apollo Hospitals",
-            ocr_extracted: { name: "Calpol 500", manufacturer: "GlaxoSmithKline Pharmaceuticals", batch_number: "GP43210", expiry_date: "08/2027", mfg_date: "08/2024", mrp: "₹32.00", license_number: "KAR/DRUGS/GSK/14219" },
-            db_match_results: {
-              batch_number: { extracted: "GP43210", stored: "GP43210", match: true },
-              manufacturing_date: { extracted: "08/2024", stored: "08/2024", match: true },
-              expiry_date: { extracted: "08/2027", stored: "07/2027", match: false },
-              manufacturer: { extracted: "GlaxoSmithKline Pharmaceuticals", stored: "GlaxoSmithKline Pharmaceuticals", match: true },
-              mrp: { extracted: "₹32.00", stored: "₹32.00", match: true },
-              license_number: { extracted: "KAR/DRUGS/GSK/14219", stored: "KAR/DRUGS/GSK/14219", match: true }
-            },
-            image_analysis: { score: 97, anomalies: [] },
-            barcode_status: { required: false, found: false, match: null, note: 'Barcode not required for strip packaging' },
-            anomalies: [],
-            signal_breakdown: { batch_number: 100, manufacturing_date: 100, expiry_date: 0, manufacturer: 100, medicine_name: 100, image_analysis: 97, barcode: null }
-          };
-        } else if (filename.includes('crocin')) {
-          offlineResult = {
-            id: 'scan-2291',
-            medicine_id: "med-crocin",
-            medicine_name: "Crocin 650",
-            generic_name: "Paracetamol",
-            manufacturer_name: "GlaxoSmithKline Pharmaceuticals",
-            authenticity_score: 24.5,
-            verdict: "high_risk",
-            hospital: "Apollo Hospitals",
-            ocr_extracted: { name: "Crocin 650", manufacturer: "GlaxoSmithKline Pharmaceuticals", batch_number: "INVALID-999-BATCH", expiry_date: "12/2028", mfg_date: "12/2025", mrp: "₹55.00", license_number: "" },
-            db_match_results: {
-              batch_number: { extracted: "INVALID-999-BATCH", stored: null, match: false, note: "Batch not found in genuine batch database" },
-              manufacturing_date: { extracted: "12/2025", stored: null, match: false },
-              expiry_date: { extracted: "12/2028", stored: null, match: false },
-              manufacturer: { extracted: "GlaxoSmithKline Pharmaceuticals", stored: null, match: false },
-              mrp: { extracted: "₹55.00", stored: null, match: false },
-              license_number: { extracted: "", stored: null, match: false }
-            },
-            image_analysis: { score: 62, anomalies: ["High print blur detected. Possible scanned/reprinted packaging."] },
-            barcode_status: { required: true, found: false, match: false, note: 'Barcode required but not detected on packaging' },
-            anomalies: ["Batch 'INVALID-999-BATCH' not found in genuine batch database.", "Barcode required for Crocin 650 box but not present."],
-            signal_breakdown: { batch_number: 0, manufacturing_date: 0, expiry_date: 0, manufacturer: 0, medicine_name: 100, image_analysis: 62, barcode: 0 }
-          };
-        } else {
-          offlineResult = {
-            id: 'scan-8821',
-            medicine_id: "med-omez",
-            medicine_name: "Omez 20",
-            generic_name: "Omeprazole",
-            manufacturer_name: "Dr. Reddy's Laboratories",
-            authenticity_score: 65.2,
-            verdict: "caution",
-            hospital: "Apollo Hospitals",
-            ocr_extracted: { name: "Omez 20", manufacturer: "Dr. Reddy's Laboratories", batch_number: "MC8872", expiry_date: "12/2028", mfg_date: "12/2024", mrp: "₹48.00", license_number: "" },
-            db_match_results: {
-              batch_number: { extracted: "MC8872", stored: null, match: false, note: "Batch not found in genuine batch database" },
-              manufacturing_date: { extracted: "12/2024", stored: null, match: false },
-              expiry_date: { extracted: "12/2028", stored: null, match: false },
-              manufacturer: { extracted: "Dr. Reddy's Laboratories", stored: null, match: false },
-              mrp: { extracted: "₹48.00", stored: null, match: false }
-            },
-            image_analysis: { score: 60, anomalies: ["Color variance detected (delta: 74). Possible printing batch color drift."] },
-            barcode_status: { required: false, found: false, match: null, note: 'Barcode not required for this medicine' },
-            anomalies: ["Batch 'MC8872' not found in genuine batch records for Omez 20.", "Packaging color profile variance check: Hue mismatch detected."],
-            signal_breakdown: { batch_number: 0, manufacturing_date: 0, expiry_date: 0, manufacturer: 0, medicine_name: 100, image_analysis: 60, barcode: null }
-          };
-        }
-
+        let offlineResult = {
+          id: `scan-${Date.now()}`,
+          medicine_id: null,
+          medicine_name: uploadFile.name.replace(/\.[^/.]+$/, '') || "Unknown medicine",
+          generic_name: null,
+          manufacturer_name: null,
+          authenticity_score: 50,
+          confidence: "Low",
+          verdict: "caution",
+          hospital: "Apollo Hospitals",
+          ocr_extracted: {
+            name: "Not Detected",
+            manufacturer: "Not Detected",
+            batch_number: "Not Detected",
+            expiry_date: "Not Detected",
+            mfg_date: "Not Detected",
+            mrp: "Not Detected",
+            strength: "Not Detected",
+            dosage_form: "Not Detected",
+            composition: "Not Detected",
+            license_number: "Not Detected",
+            barcode: "Not Detected"
+          },
+          db_match_results: {},
+          image_analysis: { score: 50, anomalies: ["Live pipeline unavailable; registry match could not be completed."] },
+          barcode_status: { status: "skipped", required: false, found: false, match: null, note: "Barcode verification unavailable in local fallback" },
+          anomalies: ["Live ML pipeline unavailable. Please retry with backend and ML services running."],
+          signal_breakdown: { ocr: 0, db: 0, batch: 0, barcode: 0, packaging: 50, logo: 0, color: 0, layout: 0, tamper: 0 }
+        };
         const verifiedData = {
           ...offlineResult,
           analysis_status: 'demo',
@@ -619,8 +560,8 @@ export default function App() {
         setScanHistory(prev => [verifiedData, ...prev]);
         setSelectedReportScan(verifiedData);
         setIsScanning(false);
-        showToast('Live analysis unavailable. Showing clearly marked demo result.', 'warning');
-        setAlternatives([{ name: 'Dolo 500', manufacturer: 'Micro Labs Ltd', score: 98 }]);
+        showToast('Live analysis unavailable. No medicine match was inferred.', 'warning');
+        setAlternatives([]);
       }
     }, 300);
   };
@@ -1665,11 +1606,12 @@ export default function App() {
                               <span>Database Verification</span>
                               {(() => {
                                 const fields = Object.values(scanResult.db_match_results);
-                                const matched = fields.filter(f => f.match).length;
-                                const total = fields.length;
+                                const comparableFields = fields.filter(f => f.status !== 'Skipped' && f.status !== 'Reference Only');
+                                const matched = comparableFields.filter(f => f.match).length;
+                                const total = comparableFields.length;
                                 return (
                                   <span className={`db-verify-badge ${
-                                    matched === total ? 'all-match' : matched > total / 2 ? 'partial-match' : 'no-match'
+                                    total > 0 && matched === total ? 'all-match' : matched > total / 2 ? 'partial-match' : 'no-match'
                                   }`}>
                                     {matched}/{total} fields
                                   </span>
@@ -1689,15 +1631,15 @@ export default function App() {
                                 {Object.entries(scanResult.db_match_results).map(([field, data]) => (
                                   <tr key={field}>
                                     <td className="field-name">{field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</td>
-                                    <td className="field-value extracted">{data.extracted || <span className="field-empty">—</span>}</td>
-                                    <td className="field-value stored">{data.stored || <span className="field-empty">Not on record</span>}</td>
+                                    <td className="field-value extracted">{displayValue(data.extracted, 'Not Detected')}</td>
+                                    <td className="field-value stored">{displayValue(data.stored, 'Not on record')}</td>
                                     <td className="field-status">
                                       {data.match === true ? (
                                         <span className="match-badge match"><CheckCircle className="w-3 h-3" /> Match</span>
                                       ) : data.match === false ? (
                                         <span className="match-badge mismatch"><XCircle className="w-3 h-3" /> Mismatch</span>
                                       ) : (
-                                        <span className="match-badge neutral">—</span>
+                                        <span className="match-badge neutral">{data.status || 'Skipped'}</span>
                                       )}
                                       {data.note && <span className="field-note">{data.note}</span>}
                                     </td>
@@ -1908,28 +1850,28 @@ export default function App() {
                               <div>
                                 <div className="flex justify-between mb-1">
                                   <span>OCR Name accuracy</span>
-                                  <span>{scanResult.signal_breakdown?.ocr || 90}%</span>
+                                  <span>{scoreValueOrZero(scanResult.signal_breakdown?.ocr)}%</span>
                                 </div>
                                 <div className="w-full bg-[#EEF2F6] h-1.5 rounded-full">
-                                  <div className="bg-[#2563EB] h-1.5 rounded-full" style={{ width: `${scanResult.signal_breakdown?.ocr || 90}%` }}></div>
+                                  <div className="bg-[#2563EB] h-1.5 rounded-full" style={{ width: `${scoreValueOrZero(scanResult.signal_breakdown?.ocr)}%` }}></div>
                                 </div>
                               </div>
                               <div>
                                 <div className="flex justify-between mb-1">
                                   <span>Visual branding template</span>
-                                  <span>{scanResult.signal_breakdown?.visual || 90}%</span>
+                                  <span>{scoreValueOrZero(scanResult.signal_breakdown?.visual)}%</span>
                                 </div>
                                 <div className="w-full bg-[#EEF2F6] h-1.5 rounded-full">
-                                  <div className="bg-[#2563EB] h-1.5 rounded-full" style={{ width: `${scanResult.signal_breakdown?.visual || 90}%` }}></div>
+                                  <div className="bg-[#2563EB] h-1.5 rounded-full" style={{ width: `${scoreValueOrZero(scanResult.signal_breakdown?.visual)}%` }}></div>
                                 </div>
                               </div>
                               <div>
                                 <div className="flex justify-between mb-1">
                                   <span>Batch number format</span>
-                                  <span>{scanResult.signal_breakdown?.batch || 90}%</span>
+                                  <span>{scoreValueOrZero(scanResult.signal_breakdown?.batch)}%</span>
                                 </div>
                                 <div className="w-full bg-[#EEF2F6] h-1.5 rounded-full">
-                                  <div className="bg-[#2563EB] h-1.5 rounded-full" style={{ width: `${scanResult.signal_breakdown?.batch || 90}%` }}></div>
+                                  <div className="bg-[#2563EB] h-1.5 rounded-full" style={{ width: `${scoreValueOrZero(scanResult.signal_breakdown?.batch)}%` }}></div>
                                 </div>
                               </div>
                             </div>
@@ -1947,7 +1889,7 @@ export default function App() {
                         <div className="space-y-3 text-xs">
                           <div>
                             <span className="text-[#6B7280] block">Generic Name</span>
-                            <strong className="text-[#111827]">{scanResult.generic_name}</strong>
+                            <strong className="text-[#111827]">{displayValue(scanResult.generic_name, 'Reference match pending')}</strong>
                           </div>
                           <div>
                             <span className="text-[#6B7280] block">Manufacturer</span>
@@ -1955,7 +1897,7 @@ export default function App() {
                           </div>
                           <div>
                             <span className="text-[#6B7280] block">Batch Code</span>
-                            <strong className="text-[#111827] font-mono">{scanResult.ocr_extracted?.batch_number}</strong>
+                            <strong className="text-[#111827] font-mono">{displayValue(scanResult.ocr_extracted?.batch_number, 'Not Detected')}</strong>
                           </div>
                           <div>
                             <span className="text-[#6B7280] block">Facility Node</span>
@@ -2027,7 +1969,7 @@ export default function App() {
                           <tr key={scan.id || idx} className="hover:bg-[#EEF2F6]/30 transition-colors">
                             <td className="p-3 font-semibold text-[#111827]">{scan.medicine_name || 'Generic / Unknown'}</td>
                             <td className="p-3 text-[#6B7280]">{scan.manufacturer_name || 'Unknown Mfg'}</td>
-                            <td className="p-3 text-[#6B7280]">{scan.generic_name || 'Paracetamol'}</td>
+                            <td className="p-3 text-[#6B7280]">{displayValue(scan.generic_name, 'Reference match pending')}</td>
                             <td className="p-3 text-[#6B7280]">{scan.hospital || 'Apollo Hospitals'}</td>
                             <td className="p-3">
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
@@ -2170,7 +2112,7 @@ export default function App() {
                             </tr>
                             <tr className="border-b border-[#E4E8EE]">
                               <td className="p-2.5 font-bold text-[#6B7280]">Generic Formulation</td>
-                              <td className="p-2.5 text-[#111827]">{selectedReportScan.generic_name || 'Paracetamol'}</td>
+                              <td className="p-2.5 text-[#111827]">{displayValue(selectedReportScan.generic_name, 'Reference match pending')}</td>
                             </tr>
                             <tr className="border-b border-[#E4E8EE] bg-[#F5F7FA]">
                               <td className="p-2.5 font-bold text-[#6B7280]">Manufacturer</td>
@@ -2178,7 +2120,7 @@ export default function App() {
                             </tr>
                             <tr className="border-b border-[#E4E8EE]">
                               <td className="p-2.5 font-bold text-[#6B7280]">Batch Serial Code</td>
-                              <td className="p-2.5 text-[#111827] font-bold">{selectedReportScan.ocr_extracted?.batch_number || 'GP43210'}</td>
+                              <td className="p-2.5 text-[#111827] font-bold">{displayValue(selectedReportScan.ocr_extracted?.batch_number, 'Not Detected')}</td>
                             </tr>
                             <tr className="border-b border-[#E4E8EE] bg-[#F5F7FA]">
                               <td className="p-2.5 font-bold text-[#6B7280]">Forensic Node Location</td>
@@ -2708,3 +2650,5 @@ export default function App() {
     </div>
   );
 }
+
+

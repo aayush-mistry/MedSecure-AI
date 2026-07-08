@@ -175,8 +175,8 @@ fastify.get('/api/v1/medicines/search', async (request) => {
   const q = request.query.q;
   if (!q) return [];
   const results = await query.all(
-    `SELECT id, name, generic_name, manufacturer_name, composition, expected_colors, approved_batch_format, barcode_required, dosage_form, pack_size, pack_unit, price_inr, primary_strength, therapeutic_class
-     FROM medicines WHERE brand_name LIKE ? OR primary_ingredient LIKE ? OR manufacturer LIKE ? LIMIT 20`,
+    `SELECT id, name, generic_name, manufacturer_name, composition, expected_colors, approved_batch_format, barcode_required
+     FROM medicines WHERE name LIKE ? OR generic_name LIKE ? OR manufacturer_name LIKE ? LIMIT 20`,
     [`%${q}%`, `%${q}%`, `%${q}%`]
   );
   return results.map(r => ({
@@ -377,10 +377,10 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
     let lastStage = -1;
     let result = null;
     let missingProgressPolls = 0;
-    const maxPolls = 120; // 60 second timeout
+    const maxPolls = 600; // 60 second timeout
 
     for (let i = 0; i < maxPolls; i++) {
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 100));
 
       const progRes = await fetchMlProgress(scanId);
       if (!progRes) {
@@ -418,6 +418,13 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
 
     if (!result) throw new Error('ML pipeline timed out');
 
+    const matchedMedicine = result.medicine_id
+      ? await query.get(
+          'SELECT name, generic_name, manufacturer_name FROM medicines WHERE id=?',
+          [result.medicine_id]
+        )
+      : null;
+
     const verdict = result.authenticity_score >= 80 ? 'verified'
       : result.authenticity_score >= 55 ? 'caution' : 'high_risk';
 
@@ -444,8 +451,9 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
     );
 
     // Auto-create counterfeit alert for high_risk scans
-    if (verdict === 'high_risk' && result.medicine_id) {
-      const batch = result.ocr_extracted?.batch_number || 'UNKNOWN';
+    const detectedBatch = result.ocr_extracted?.batch_number;
+    if (verdict === 'high_risk' && result.medicine_id && detectedBatch && detectedBatch !== 'Not Detected') {
+      const batch = detectedBatch;
       const existing = await query.get(
         'SELECT * FROM alerts WHERE medicine_id=? AND batch_number=?',
         [result.medicine_id, batch]
@@ -471,11 +479,14 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
         id: scanId,
         image_url: relativeUrl,
         authenticity_score: result.authenticity_score,
+        confidence: result.confidence,
         verdict,
         analysis_status: 'completed',
         analysis_mode: 'ml_pipeline',
         analysis_summary: 'Completed by the live ML inference pipeline.',
         ocr_extracted: result.ocr_extracted,
+        ocr_field_details: result.ocr_field_details,
+        raw_ocr_text: result.raw_ocr_text,
         db_match_results: result.db_match_results,
         image_analysis: result.image_analysis,
         barcode_status: result.barcode_status,
@@ -483,8 +494,9 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
         signal_breakdown: result.signal_breakdown,
         medicine_id: result.medicine_id,
         batch_id: result.batch_id,
-        medicine_name: result.medicine_name || result.ocr_extracted?.name,
-        manufacturer_name: result.manufacturer_name,
+        medicine_name: result.medicine_name || matchedMedicine?.name || result.ocr_extracted?.name,
+        generic_name: result.generic_name || matchedMedicine?.generic_name,
+        manufacturer_name: result.manufacturer_name || matchedMedicine?.manufacturer_name,
         lat,
         lng
       }
