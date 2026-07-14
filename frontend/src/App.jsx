@@ -15,6 +15,7 @@ import 'leaflet/dist/leaflet.css';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api/v1';
+const ML_SCAN_WATCHDOG_MS = Number(import.meta.env.VITE_ML_SCAN_WATCHDOG_MS || 190000);
 
 export default function App() {
   const [currentView, setCurrentView] = useState('dashboard');
@@ -283,6 +284,17 @@ export default function App() {
     return value;
   };
 
+  const getBatchDisplayValue = (result) => {
+    if (!result) return 'Not Detected';
+    const ocrBatch = result.ocr_extracted?.batch_number;
+    return displayValue(
+      ocrBatch && ocrBatch !== 'Not Detected'
+        ? ocrBatch
+        : result.batch_number || result.db_match_results?.batch_number?.extracted,
+      'Not Detected'
+    );
+  };
+
   const scoreValueOrZero = (value) => {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : 0;
@@ -466,7 +478,7 @@ export default function App() {
             stopScanTimers();
             showToast('Live scan timed out waiting for ML progress. Check backend/ML logs.', 'error');
           }
-        }, 70000);
+        }, ML_SCAN_WATCHDOG_MS);
       };
 
       ws.onmessage = (event) => {
@@ -695,7 +707,7 @@ export default function App() {
       result = result.filter(item => 
         (item.medicine_name || '').toLowerCase().includes(tableSearch.toLowerCase()) || 
         (item.manufacturer_name || '').toLowerCase().includes(tableSearch.toLowerCase()) ||
-        (item.ocr_extracted?.batch_number || '').toLowerCase().includes(tableSearch.toLowerCase())
+        getBatchDisplayValue(item).toLowerCase().includes(tableSearch.toLowerCase())
       );
     }
     return result;
@@ -1549,7 +1561,7 @@ export default function App() {
                           </div>
                           <div>
                             <span>Batch Code</span>
-                            <strong className="font-mono">{scanResult.ocr_extracted?.batch_number || 'Not extracted'}</strong>
+                            <strong className="font-mono">{getBatchDisplayValue(scanResult)}</strong>
                           </div>
                           <div>
                             <span>Facility Node</span>
@@ -1932,7 +1944,7 @@ export default function App() {
                           </div>
                           <div>
                             <span className="text-[#6B7280] block">Batch Code</span>
-                            <strong className="text-[#111827] font-mono">{displayValue(scanResult.ocr_extracted?.batch_number, 'Not Detected')}</strong>
+                            <strong className="text-[#111827] font-mono">{getBatchDisplayValue(scanResult)}</strong>
                           </div>
                           <div>
                             <span className="text-[#6B7280] block">Facility Node</span>
@@ -2155,7 +2167,7 @@ export default function App() {
                             </tr>
                             <tr className="border-b border-[#E4E8EE]">
                               <td className="p-2.5 font-bold text-[#6B7280]">Batch Serial Code</td>
-                              <td className="p-2.5 text-[#111827] font-bold">{displayValue(selectedReportScan.ocr_extracted?.batch_number, 'Not Detected')}</td>
+                              <td className="p-2.5 text-[#111827] font-bold">{getBatchDisplayValue(selectedReportScan)}</td>
                             </tr>
                             <tr className="border-b border-[#E4E8EE] bg-[#F5F7FA]">
                               <td className="p-2.5 font-bold text-[#6B7280]">Forensic Node Location</td>

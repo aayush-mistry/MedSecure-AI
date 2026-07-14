@@ -20,6 +20,8 @@ const ML_SERVICE_URLS = (process.env.ML_SERVICE_URLS || process.env.ML_SERVICE_U
   .split(',')
   .map(url => url.trim().replace(/\/+$/, ''))
   .filter(Boolean);
+const ML_SCAN_TIMEOUT_MS = parseInt(process.env.ML_SCAN_TIMEOUT_MS || '180000', 10);
+const ML_PROGRESS_POLL_MS = parseInt(process.env.ML_PROGRESS_POLL_MS || '250', 10);
 const JWT_SECRET = process.env.JWT_SECRET || 'medsecure-dev-secret';
 
 const fastify = Fastify({ logger: true });
@@ -440,10 +442,10 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
     let lastStage = -1;
     let result = null;
     let missingProgressPolls = 0;
-    const maxPolls = 600; // 60 second timeout
+    const maxPolls = Math.max(1, Math.ceil(ML_SCAN_TIMEOUT_MS / ML_PROGRESS_POLL_MS));
 
     for (let i = 0; i < maxPolls; i++) {
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, ML_PROGRESS_POLL_MS));
 
       const progRes = await fetchMlProgress(scanId);
       if (!progRes) {
@@ -557,6 +559,7 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
         signal_breakdown: result.signal_breakdown,
         medicine_id: result.medicine_id,
         batch_id: result.batch_id,
+        batch_number: result.batch_number || result.ocr_extracted?.batch_number || result.db_match_results?.batch_number?.extracted,
         medicine_name: result.medicine_name || matchedMedicine?.name || result.ocr_extracted?.name,
         generic_name: result.generic_name || matchedMedicine?.generic_name,
         manufacturer_name: result.manufacturer_name || matchedMedicine?.manufacturer_name,
