@@ -6,7 +6,7 @@ import bcrypt from 'bcryptjs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const dbPath = path.join(__dirname, '..', 'db', 'medsecure.db');
+const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'db', 'indian_pharmaceutical_products.db');
 const db = new sqlite3.Database(dbPath);
 
 // Helper to wrap sqlite3 queries in promises
@@ -169,6 +169,11 @@ export async function initDb() {
   // ── Seed medicines ───────────────────────────────────────────────────────
 
   const countRow = await query.get('SELECT COUNT(*) as count FROM medicines');
+  if (countRow.count === 0 && process.env.ALLOW_DEMO_SEED !== '1') {
+    throw new Error(
+      'Indian pharmaceutical products database is empty. Run `python migrate_csv.py` from the project root first.'
+    );
+  }
   if (countRow.count === 0) {
     console.log('Seeding CDSCO-listed medicines...');
 

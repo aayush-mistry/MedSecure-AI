@@ -1,4 +1,4 @@
-import sys, os, json, cv2, re
+import sys, os, json, cv2, re, sqlite3
 import numpy as np
 
 # Directly test the barcode and visual functions without importing main (avoids EasyOCR init)
@@ -112,6 +112,25 @@ def analyze_visual_quality(img, expected_colors_json):
     return max(0.0, score), anomalies
 
 base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend", "public", "samples")
+db_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "db", "indian_pharmaceutical_products.db"))
+
+if not os.path.exists(db_path):
+    raise SystemExit(f"Canonical Indian pharmaceutical DB not found: {db_path}. Run `python migrate_csv.py` first.")
+
+with sqlite3.connect(db_path) as conn:
+    med_count = conn.execute("SELECT COUNT(*) FROM medicines").fetchone()[0]
+    batch_count = conn.execute("SELECT COUNT(*) FROM medicine_batches").fetchone()[0]
+    fixture_count = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM medicine_batches
+        WHERE batch_number IN ('GP43210', 'BT4521', 'GP99210', 'OMZ441')
+        """
+    ).fetchone()[0]
+    assert med_count > 1000, f"Expected Indian product rows, found {med_count}"
+    assert batch_count >= 4, f"Expected fixture batches, found {batch_count}"
+    assert fixture_count >= 4, f"Expected Indian DB fixture batches, found {fixture_count}"
+    print(f"DB: {med_count} medicines, {batch_count} batches, {fixture_count} fixture batches")
 
 for name, colors_hex in [
     ("calpol_genuine.jpg", "#10b981"),

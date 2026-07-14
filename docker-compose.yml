@@ -7,18 +7,21 @@ services:
       - PORT=3001
       - JWT_SECRET=medsecure-docker-secret-2026
       - ML_SERVICE_URL=http://ml:8000
+      - DB_PATH=/db/indian_pharmaceutical_products.db
     volumes:
       - backend_data:/app/uploads
-      - medsecure_db:/db
+      - ./db:/db
     restart: unless-stopped
 
   ml:
     build: ./ml
     ports:
       - "8000:8000"
+    environment:
+      - DB_PATH=/db/indian_pharmaceutical_products.db
     volumes:
       - backend_data:/app/uploads
-      - medsecure_db:/db
+      - ./db:/db
     restart: unless-stopped
 
   frontend:
@@ -31,4 +34,3 @@ services:
 
 volumes:
   backend_data:
-  medsecure_db:

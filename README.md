@@ -136,7 +136,8 @@ The easiest way to bootstrap the platform is via Docker. Ensure Docker and Docke
 git clone https://github.com/VekariaDharmesh/MedSecure-AI.git
 cd MedSecure-AI
 
-# 2. Pre-generate mock database data and sample images
+# 2. Build the canonical Indian pharmaceutical products DB and sample images
+python migrate_csv.py
 cd ml && python create_samples.py && cd ..
 
 # 3. Spin up all containers in detached mode
@@ -152,8 +153,9 @@ Access points:
 ### Option B: Local Development Setup
 If running services natively, set them up using separate terminal tabs:
 
-#### 1. Pre-generate Demo Materials
+#### 1. Build Canonical DB And Samples
 ```bash
+python migrate_csv.py
 cd ml
 python create_samples.py
 ```
@@ -165,7 +167,7 @@ cd ml
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
-python main.py
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 #### 3. Backend Fastify Server Setup
@@ -174,7 +176,7 @@ cd backend
 npm install
 npm start
 ```
-*Note: A SQLite file `medsecure.db` will be initialized in the root `db` directory upon launch.*
+*Note: the app now uses `db/indian_pharmaceutical_products.db`, built from `indian_pharmaceutical_products_clean.csv` by `migrate_csv.py`.*
 
 #### 4. Frontend React Web App Setup
 ```bash
@@ -189,11 +191,11 @@ npm run dev
 
 Once the applications are running locally, open `http://localhost:5173` to test the demo packages preset at the top of the interface:
 
-* **Scenario 1: Calpol 650 (Genuine)**
+* **Scenario 1: Calpol 500mg Tablet (Genuine)**
   * **Expected Result:** High authenticity score (98.4%), registration matching, valid batch regex structure. Badge status: **Verified Genuine**.
-* **Scenario 2: Crocin 500 (Counterfeit Batch Format)**
+* **Scenario 2: Crocin Advance Tablet (Counterfeit Batch Format)**
   * **Expected Result:** Flags a batch format mismatch regex violation. Badge status: **High Risk Alert**.
-* **Scenario 3: Omez 20 (Counterfeit Package Profile)**
+* **Scenario 3: Bromez 20mg Capsule (Counterfeit Package Profile)**
   * **Expected Result:** Triggers a primary color profile deviation (e.g., blue tint detected where red print was expected) along with high printing blur indices. Badge status: **High Risk Alert / Caution**.
 
 ---

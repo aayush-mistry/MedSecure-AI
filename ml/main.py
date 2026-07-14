@@ -31,7 +31,10 @@ print("Loading EasyOCR model (CPU)...")
 reader = easyocr.Reader(['en'], gpu=False, verbose=False)
 print("EasyOCR ready.")
 
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "db", "medsecure.db"))
+DB_PATH = os.environ.get(
+    "DB_PATH",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "db", "indian_pharmaceutical_products.db"))
+)
 MAX_OCR_DIMENSION = 1280
 MAX_ANALYSIS_DIMENSION = 1600
 
@@ -660,6 +663,14 @@ def generate_evidence_report(stages_results):
     }
 
 
+def db_verdict(score):
+    if score >= 80:
+        return "verified"
+    if score >= 55:
+        return "caution"
+    return "high_risk"
+
+
 def run_full_pipeline(scan_id, file_path):
     try:
         set_progress(scan_id, "image_quality", 0, 0.05)
@@ -773,14 +784,59 @@ def run_full_pipeline(scan_id, file_path):
         # Extract anomalies for legacy compatibility in DB
         anomalies = [line for line in final_report["explanation"] if line.startswith("FAIL") or line.startswith("WARN")]
 
-        # Write result
+        # Write result. The backend creates the scan row before calling ML, so
+        # prefer UPDATE; INSERT keeps direct ML testing usable.
         cur = conn.cursor()
         try:
+            scan_values = (
+                med_row["id"] if med_row else None,
+                batch_row["id"] if batch_row else None,
+                final_report["score"],
+                db_verdict(final_report["score"]),
+                json.dumps(ocr_public),
+                json.dumps(verification_results),
+                json.dumps(res_packaging),
+                json.dumps(res_barcode),
+                json.dumps(anomalies),
+                json.dumps(final_report["breakdown"]),
+                scan_id
+            )
             cur.execute("""
-                INSERT INTO scans (id, medicine_id, batch_number, authenticity_score, verdict, anomalies_json, scanned_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (scan_id, med_row["id"] if med_row else None, fields["batch_number"] if is_detected(fields["batch_number"]) else None, final_report["score"], 
-                  final_report["verdict"].lower().replace(' ', '_'), json.dumps(anomalies), int(time.time()*1000)))
+                UPDATE scans SET
+                    medicine_id=?,
+                    batch_id=?,
+                    authenticity_score=?,
+                    verdict=?,
+                    ocr_extracted=?,
+                    db_match_results=?,
+                    image_analysis=?,
+                    barcode_status=?,
+                    anomalies=?,
+                    signal_breakdown=?,
+                    scanned_at=CURRENT_TIMESTAMP
+                WHERE id=?
+            """, scan_values)
+            if cur.rowcount == 0:
+                cur.execute("""
+                    INSERT INTO scans (
+                        id, medicine_id, batch_id, authenticity_score, verdict,
+                        ocr_extracted, db_match_results, image_analysis,
+                        barcode_status, anomalies, signal_breakdown
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    scan_id,
+                    scan_values[0],
+                    scan_values[1],
+                    scan_values[2],
+                    scan_values[3],
+                    scan_values[4],
+                    scan_values[5],
+                    scan_values[6],
+                    scan_values[7],
+                    scan_values[8],
+                    scan_values[9]
+                ))
             conn.commit()
         except sqlite3.Error as e:
             # Fallback if scans table doesn't exist yet or if id already exists

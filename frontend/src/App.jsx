@@ -208,7 +208,7 @@ export default function App() {
           .addTo(map);
 
         L.marker([21.1702, 72.8311], { icon: customIconCaution })
-          .bindPopup(`<div class="p-2 text-xs font-sans"><strong>Omez 20 Print Bleed</strong><br/>Location: Surat Clinic Node<br/>Severity: Caution</div>`)
+          .bindPopup(`<div class="p-2 text-xs font-sans"><strong>Bromez 20mg Print Bleed</strong><br/>Location: Surat Clinic Node<br/>Severity: Caution</div>`)
           .addTo(map);
 
         L.marker([22.3072, 73.1812], { icon: customIconHigh })
@@ -1024,7 +1024,7 @@ export default function App() {
                           }}
                           className="px-3 py-1 bg-[#EEF2F6] hover:bg-[#E4E8EE] text-[#111827] rounded-lg font-semibold cursor-pointer"
                         >
-                          Omez (Color Mismatch)
+                          Bromez (Color Mismatch)
                         </button>
                       </div>
 
@@ -1476,7 +1476,7 @@ export default function App() {
                           setScanResult(null);
                         }}
                       >
-                        Omez Color Mismatch
+                        Bromez Color Mismatch
                       </button>
                     </div>
                   </motion.section>
