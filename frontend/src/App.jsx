@@ -295,6 +295,15 @@ export default function App() {
     );
   };
 
+  const getImageOverlayBoxes = (result) => {
+    const boxes = result?.ocr_extracted?.ocr_boxes;
+    if (Array.isArray(boxes) && boxes.length > 0) return boxes;
+    if (result && result.verdict !== 'verified') {
+      return [{ x: 16, y: 18, w: 68, h: 54, text: 'Packaging anomaly region', confidence: 0 }];
+    }
+    return [];
+  };
+
   const scoreValueOrZero = (value) => {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : 0;
@@ -1156,15 +1165,20 @@ export default function App() {
                               <img src={previewUrl} alt="Blister scan" className="max-h-full w-auto object-contain block" />
                               
                               {/* Overlay highlights */}
-                              {scanResult.ocr_extracted?.ocr_boxes?.map((box, idx) => (
+                              {getImageOverlayBoxes(scanResult).map((box, idx) => (
                                 <div 
                                   key={idx}
                                   className={scanResult.verdict !== 'verified' ? "box-highlight absolute" : "box-highlight-success absolute"} 
                                   style={{ top: `${box.y}%`, left: `${box.x}%`, width: `${box.w}%`, height: `${box.h}%` }}
-                                  onMouseEnter={() => setHoveredBox(`Detected Text: ${box.text}`)}
+                                  onMouseEnter={() => setHoveredBox(box.text ? `Detected Text: ${box.text}` : 'Packaging anomaly region')}
                                   onMouseLeave={() => setHoveredBox(null)}
                                 ></div>
                               ))}
+                              {hoveredBox && (
+                                <div className="absolute left-2 bottom-2 max-w-[calc(100%-1rem)] rounded bg-[#111827]/90 px-2 py-1 text-[10px] font-semibold text-white shadow-lg">
+                                  {hoveredBox}
+                                </div>
+                              )}
                             </div>
                           </div>
 
@@ -1634,7 +1648,7 @@ export default function App() {
                       <div className="inspection-preview flex items-center justify-center">
                         <div className="relative inline-block max-h-full">
                           <img src={previewUrl} alt="Visual inspect" className="max-h-full w-auto object-contain block" />
-                          {scanResult.ocr_extracted?.ocr_boxes?.map((box, idx) => (
+                          {getImageOverlayBoxes(scanResult).map((box, idx) => (
                             <div 
                               key={idx}
                               className={scanResult.verdict !== 'verified' ? "box-highlight absolute" : "box-highlight-success absolute"} 
@@ -1881,7 +1895,7 @@ export default function App() {
                           <div className="md:col-span-5 border border-[#E4E8EE] rounded-lg overflow-hidden max-h-64 flex items-center justify-center">
                             <div className="relative inline-block max-h-full">
                               <img src={previewUrl} alt="Visual inspect" className="max-h-full w-auto object-contain block" />
-                              {scanResult.ocr_extracted?.ocr_boxes?.map((box, idx) => (
+                              {getImageOverlayBoxes(scanResult).map((box, idx) => (
                                 <div 
                                   key={idx}
                                   className={scanResult.verdict !== 'verified' ? "box-highlight absolute" : "box-highlight-success absolute"} 

@@ -23,7 +23,7 @@ except Exception:
     HAS_ZBAR = False
     def zbar_decode(*args, **kwargs):
         return []
-    print("ZBar not available. Barcode detection disabled.")
+    print("ZBar not available. Falling back to OpenCV QR detection.")
 
 app = FastAPI(title="MedSecure ML Inference Service v5 (12-Stage Pipeline)")
 
@@ -512,6 +512,44 @@ def safe_stage(stage_name, fallback, fn):
         return failed
 
 # --- Stage 6: Barcode Verification ---
+def build_ocr_boxes(ocr_results, image_shape):
+    image_h, image_w = image_shape[:2]
+    boxes = []
+    for result in ocr_results:
+        if len(result) < 3:
+            continue
+        points, text, conf = result[0], clean_ocr_text(result[1]), float(result[2] or 0)
+        if not text or conf < 0.25:
+            continue
+        xs = [float(point[0]) for point in points]
+        ys = [float(point[1]) for point in points]
+        left, top = min(xs), min(ys)
+        width, height = max(xs) - left, max(ys) - top
+        if width <= 1 or height <= 1:
+            continue
+        boxes.append({
+            "x": round((left / image_w) * 100, 2),
+            "y": round((top / image_h) * 100, 2),
+            "w": round((width / image_w) * 100, 2),
+            "h": round((height / image_h) * 100, 2),
+            "text": text[:80],
+            "confidence": round(conf, 3)
+        })
+    return boxes[:30]
+
+def decode_barcodes_opencv(gray):
+    detector = cv2.QRCodeDetector()
+    decoded = []
+    try:
+        ok, decoded_info, _, _ = detector.detectAndDecodeMulti(gray)
+        if ok:
+            decoded.extend([value for value in decoded_info if value])
+    except Exception:
+        value, _, _ = detector.detectAndDecode(gray)
+        if value:
+            decoded.append(value)
+    return decoded
+
 def decode_barcodes_worker(gray, queue):
     try:
         barcodes = zbar_decode(gray)
@@ -548,9 +586,6 @@ def verify_barcode(img, batch_row, med_row):
     if batch_row and batch_row.get("barcode_required"): req = True
     if med_row and med_row.get("barcode_required"): req = True
 
-    if not HAS_ZBAR:
-        return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": "Barcode decoder unavailable", "reason": "Barcode verification skipped", "score": 85 if not req else 70}
-
     h, w = img.shape[:2]
     max_dim = max(h, w)
     scan_img = img
@@ -559,13 +594,18 @@ def verify_barcode(img, batch_row, med_row):
         scan_img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
     gray = cv2.cvtColor(scan_img, cv2.COLOR_BGR2GRAY)
-    decoded, decode_error = decode_barcodes_with_timeout(gray)
+    if HAS_ZBAR:
+        decoded, decode_error = decode_barcodes_with_timeout(gray)
+    else:
+        decoded, decode_error = decode_barcodes_opencv(gray), None
+
     if decode_error:
         print(f"Barcode decoding skipped: {decode_error}")
         return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": decode_error, "reason": "Barcode verification skipped", "score": 85 if not req else 70}
 
     if not decoded:
-        return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": "Barcode not detected", "reason": "Barcode not detected; verification skipped", "score": 85 if not req else 70}
+        note = "Barcode not detected" if HAS_ZBAR else "Barcode not detected by OpenCV QR fallback"
+        return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": note, "reason": "Barcode not detected; verification skipped", "score": 85 if not req else 70}
     
     expected = (batch_row.get("barcode_value") or "") if batch_row else ""
     if expected and expected in decoded:
@@ -811,6 +851,7 @@ def run_full_pipeline(scan_id, file_path):
                 width_ths=0.8
             )
             fields, full_text, lines = extract_ocr_fields(ocr_res)
+            fields["ocr_boxes"] = build_ocr_boxes(ocr_res, ocr_img.shape)
         except Exception as exc:
             print(f"OCR extraction failed: {exc}", flush=True)
             ocr_res = []
@@ -820,7 +861,7 @@ def run_full_pipeline(scan_id, file_path):
                 "name": NOT_DETECTED, "manufacturer": NOT_DETECTED, "batch_number": NOT_DETECTED,
                 "mfg_date": NOT_DETECTED, "expiry_date": NOT_DETECTED, "mrp": NOT_DETECTED,
                 "strength": NOT_DETECTED, "dosage_form": NOT_DETECTED, "composition": NOT_DETECTED,
-                "license_number": NOT_DETECTED, "barcode": NOT_DETECTED, "mfr": NOT_DETECTED,
+                "license_number": NOT_DETECTED, "barcode": NOT_DETECTED, "ocr_boxes": [], "mfr": NOT_DETECTED,
                 "_confidence": {}, "_details": {}, "_raw_text": ""
             }
         ocr_public = {k: v for k, v in fields.items() if not k.startswith("_") and k != "mfr"}
