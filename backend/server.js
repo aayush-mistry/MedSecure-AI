@@ -371,12 +371,12 @@ async function checkMlHealth() {
 fastify.get('/api/v1/ml/health', async (request, reply) => {
   const health = await checkMlHealth();
   if (!health.available) {
-    return reply.status(503).send({
+    return {
       status: 'unavailable',
       service: 'ml',
       message: 'ML service is not reachable. Start the ML server before running live scans.',
       tried: health.failures
-    });
+    };
   }
   return { status: 'healthy', service: 'ml', url: health.url, detail: health.detail };
 });

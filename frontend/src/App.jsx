@@ -391,13 +391,13 @@ export default function App() {
 
   const assertMlAvailable = async () => {
     const response = await fetch(`${API_BASE_URL}/ml/health`);
-    if (response.ok) return;
     let detail = null;
     try {
       detail = await response.json();
     } catch (err) {
       detail = null;
     }
+    if (response.ok && detail?.status === 'healthy') return;
     throw new Error(detail?.message || 'ML service is not reachable. Start the ML server before running live scans.');
   };
 
@@ -518,7 +518,7 @@ export default function App() {
       };
 
     } catch (err) {
-      console.warn("Scan upload error, starting fallback simulation...", err.message);
+      console.warn("Scan could not start:", err.message);
       stopScanTimers();
       if (err.message?.includes('ML service is not reachable')) {
         setIsScanning(false);
