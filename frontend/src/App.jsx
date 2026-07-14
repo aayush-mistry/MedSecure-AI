@@ -1566,6 +1566,10 @@ export default function App() {
                       {scanResult ? (
                         <div className="space-y-3 text-xs">
                           <div>
+                            <span>Medicine Name</span>
+                            <strong>{scanResult.medicine_name || scanResult.ocr_extracted?.name || 'Reference match pending'}</strong>
+                          </div>
+                          <div>
                             <span>Generic Name</span>
                             <strong>{scanResult.generic_name || 'Reference match pending'}</strong>
                           </div>
@@ -1948,6 +1952,10 @@ export default function App() {
                       <h4 className="font-bold text-xs uppercase tracking-wider text-[#6B7280] font-mono font-bold">Metadata details</h4>
                       {scanResult ? (
                         <div className="space-y-3 text-xs">
+                          <div>
+                            <span className="text-[#6B7280] block">Medicine Name</span>
+                            <strong className="text-[#111827]">{displayValue(scanResult.medicine_name || scanResult.ocr_extracted?.name, 'Reference match pending')}</strong>
+                          </div>
                           <div>
                             <span className="text-[#6B7280] block">Generic Name</span>
                             <strong className="text-[#111827]">{displayValue(scanResult.generic_name, 'Reference match pending')}</strong>

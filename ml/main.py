@@ -163,6 +163,14 @@ def normalize_match_text(value):
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
 
+def clean_medicine_name_candidate(value):
+    value = clean_ocr_text(value)
+    value = re.sub(r"\b\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|iu)\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:tablets?|tabs?|capsules?|caps?|syrup|injection|cream|ointment|drops|strip|blister)\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:ip|bp|usp)\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"[^A-Za-z0-9 '\-]+", " ", value)
+    return clean_ocr_text(value)
+
 def field_result(value=NOT_DETECTED, confidence=0.0, source="ocr"):
     value = clean_ocr_text(value)
     return {
@@ -299,21 +307,22 @@ def extract_ocr_fields(ocr_results):
 
     ignored_name_terms = {
         "mfg", "mfd", "batch", "b no", "exp", "expiry", "mrp", "price",
-        "license", "lic", "tablet", "capsule", "strip", "schedule"
+        "license", "lic", "schedule", "paracetamol tablets"
     }
     best_name = field_result()
     for result in ocr_results:
         text = result[1].strip() if len(result) >= 2 else ""
         conf = float(result[2]) if len(result) >= 3 else 0.0
         lower = text.lower()
+        name_candidate = clean_medicine_name_candidate(text)
         looks_like_name = (
             conf >= 0.35
-            and len(text) >= 3
-            and any(ch.isalpha() for ch in text)
+            and len(name_candidate) >= 3
+            and any(ch.isalpha() for ch in name_candidate)
             and not any(term in lower for term in ignored_name_terms)
         )
         if looks_like_name and conf > best_name["confidence"]:
-            best_name = field_result(text, conf)
+            best_name = field_result(name_candidate, conf)
     field_details["name"] = best_name
 
     field_details["batch_number"] = extract_batch_number(ocr_results, full_text)
@@ -331,7 +340,8 @@ def extract_ocr_fields(ocr_results):
     )
     field_details["mrp"] = best_regex_match(
         ocr_results,
-        r'(?:mrp|price)\s*[:;\-]*\s*(?:rs\.?|inr|₹)?\s*(\d+\.?\d*)'
+        r'(?:mrp|price)\s*[:;\-]*\s*(?:rs\.?|inr|₹)?\s*[:;\-]*\s*(\d+\.?\d*)',
+        full_text=full_text
     )
     field_details["license_number"] = best_regex_match(
         ocr_results,
@@ -412,12 +422,37 @@ def build_medicine_candidates(full_text, lines, conn):
 
     return candidates
 
+def find_medicine_by_batch(batch_number, conn):
+    if not is_detected(batch_number):
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT m.*
+            FROM medicine_batches mb
+            JOIN medicines m ON m.id = mb.medicine_id
+            WHERE mb.batch_number = ?
+            LIMIT 1
+            """,
+            (batch_number,)
+        ).fetchone()
+        return dict(row) if row else None
+    except sqlite3.Error:
+        return None
+
 def verify_db_medicine(fields, full_text, lines, conn):
     cur = conn.cursor()
     try:
         cur.execute("SELECT * FROM medicines LIMIT 1")
     except sqlite3.OperationalError:
         return None, 0.0, {"status": "skipped", "reason": "Medicine database unavailable"}
+
+    batch_med = find_medicine_by_batch(fields.get("batch_number"), conn)
+    if batch_med:
+        return batch_med, 0.93, {
+            "status": "verified",
+            "reason": "Medicine identified from registered batch number"
+        }
 
     all_meds = build_medicine_candidates(full_text, lines, conn)
     if not all_meds:
@@ -561,7 +596,11 @@ def decode_barcodes_with_timeout(gray, timeout_seconds=2.0):
     try:
         ctx = mp.get_context("fork")
     except ValueError:
-        return [], "Timed barcode decoding is unavailable on this platform"
+        try:
+            barcodes = zbar_decode(gray)
+            return [b.data.decode("utf-8", errors="ignore") for b in barcodes], None
+        except Exception as exc:
+            return [], str(exc)
 
     queue = ctx.Queue()
     proc = ctx.Process(target=decode_barcodes_worker, args=(gray, queue))
@@ -893,6 +932,10 @@ def run_full_pipeline(scan_id, file_path):
         else:
             med_row, db_score, med_match_meta = None, 0.0, {"reason": "Medicine database unavailable"}
         brand_nm = medicine_name(med_row) if med_row else "Medicine Not Found"
+        if med_row and is_detected(brand_nm):
+            fields["name"] = brand_nm
+            fields.setdefault("_confidence", {})["name"] = max(fields.get("_confidence", {}).get("name", 0), db_score)
+            fields.setdefault("_details", {})["name"] = field_result(brand_nm, db_score, "registry_match")
         res_db = {
             "score": round(db_score * 100, 1) if med_row else max(0, round(db_score * 60, 1)),
             "reason": med_match_meta["reason"]
@@ -1104,7 +1147,13 @@ async def get_scan_progress(scan_id: str):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "service": "medsecure-ml-inference-12-stage"}
+    return {
+        "status": "ok",
+        "service": "medsecure-ml-inference-12-stage",
+        "ocr": "easyocr",
+        "barcode_decoder": "zbar" if HAS_ZBAR else "opencv_qr_fallback",
+        "build": "ocr-name-fix-2026-07-15"
+    }
 
 if __name__ == "__main__":
     import uvicorn
