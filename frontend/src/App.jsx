@@ -376,6 +376,31 @@ export default function App() {
     setScanResult(null);
   };
 
+  const resolveUploadFile = async () => {
+    if (!uploadFile) return null;
+    if (uploadFile.size > 0) return uploadFile;
+    if (!previewUrl?.startsWith('/samples/')) return uploadFile;
+
+    const response = await fetch(previewUrl);
+    if (!response.ok) {
+      throw new Error(`Sample image unavailable: ${previewUrl}`);
+    }
+    const blob = await response.blob();
+    return new File([blob], uploadFile.name, { type: blob.type || 'image/jpeg' });
+  };
+
+  const assertMlAvailable = async () => {
+    const response = await fetch(`${API_BASE_URL}/ml/health`);
+    if (response.ok) return;
+    let detail = null;
+    try {
+      detail = await response.json();
+    } catch (err) {
+      detail = null;
+    }
+    throw new Error(detail?.message || 'ML service is not reachable. Start the ML server before running live scans.');
+  };
+
   const handleScanSubmit = async () => {
     if (!uploadFile) return;
     setIsScanning(true);
@@ -401,8 +426,13 @@ export default function App() {
     };
 
     try {
+      await assertMlAvailable();
+      const fileForUpload = await resolveUploadFile();
+      if (!fileForUpload || fileForUpload.size === 0) {
+        throw new Error('Selected image is empty. Choose a valid package image.');
+      }
       const formData = new FormData();
-      formData.append('file', uploadFile);
+      formData.append('file', fileForUpload);
 
       const res = await fetch(`${API_BASE_URL}/scans`, {
         method: 'POST',
@@ -490,6 +520,11 @@ export default function App() {
     } catch (err) {
       console.warn("Scan upload error, starting fallback simulation...", err.message);
       stopScanTimers();
+      if (err.message?.includes('ML service is not reachable')) {
+        setIsScanning(false);
+        showToast(err.message, 'error');
+        return;
+      }
       runScanSimulation();
     }
   };

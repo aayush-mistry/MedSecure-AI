@@ -16,7 +16,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
-const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://localhost:8000';
+const ML_SERVICE_URLS = (process.env.ML_SERVICE_URLS || process.env.ML_SERVICE_URL || 'http://localhost:8000,http://127.0.0.1:8000,http://localhost:8001,http://127.0.0.1:8001')
+  .split(',')
+  .map(url => url.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
 const JWT_SECRET = process.env.JWT_SECRET || 'medsecure-dev-secret';
 
 const fastify = Fastify({ logger: true });
@@ -33,6 +36,15 @@ await fastify.register(fastifyWebsocket);
 await fastify.register(fastifyStatic, {
   root: uploadsDir,
   prefix: '/uploads/'
+});
+
+fastify.get('/', async () => {
+  return {
+    status: 'ok',
+    service: 'MedSecure AI API',
+    health: '/api/v1/health',
+    frontend: 'http://localhost:5173'
+  };
 });
 
 const wsClients = new Map();
@@ -284,6 +296,12 @@ fastify.post('/api/v1/scans', { preHandler: optionalAuth }, async (request, repl
     writeStream.on('error', reject);
   });
 
+  const stats = fs.statSync(filePath);
+  if (stats.size === 0) {
+    fs.unlinkSync(filePath);
+    return reply.status(400).send({ error: 'Uploaded image is empty' });
+  }
+
   const relativeUrl = `/uploads/${fileName}`;
   const userId = request.user ? request.user.id : null;
 
@@ -334,6 +352,35 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   }
 }
 
+async function checkMlHealth() {
+  const failures = [];
+  for (const baseUrl of ML_SERVICE_URLS) {
+    try {
+      const response = await fetchWithTimeout(`${baseUrl}/health`, {}, 3000);
+      if (response.ok) {
+        return { available: true, url: baseUrl, detail: await response.json().catch(() => ({})) };
+      }
+      failures.push(`${baseUrl}/health -> ${response.status}`);
+    } catch (err) {
+      failures.push(`${baseUrl}/health -> ${err.message}`);
+    }
+  }
+  return { available: false, urls: ML_SERVICE_URLS, failures };
+}
+
+fastify.get('/api/v1/ml/health', async (request, reply) => {
+  const health = await checkMlHealth();
+  if (!health.available) {
+    return reply.status(503).send({
+      status: 'unavailable',
+      service: 'ml',
+      message: 'ML service is not reachable. Start the ML server before running live scans.',
+      tried: health.failures
+    });
+  }
+  return { status: 'healthy', service: 'ml', url: health.url, detail: health.detail };
+});
+
 async function startMlScan(scanId, filePath) {
   const payload = JSON.stringify({ scan_id: scanId, file_path: filePath });
   const options = {
@@ -342,26 +389,42 @@ async function startMlScan(scanId, filePath) {
     body: payload
   };
   const endpoints = ['/process_scan', '/api/scan/upload'];
+  const failures = [];
 
-  for (const endpoint of endpoints) {
-    const response = await fetchWithTimeout(`${ML_SERVICE_URL}${endpoint}`, options, 10000);
-    if (response.ok) return response;
-    if (response.status !== 404) {
-      throw new Error(`ML pipeline failed to start at ${endpoint}, status ${response.status}`);
+  for (const baseUrl of ML_SERVICE_URLS) {
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetchWithTimeout(`${baseUrl}${endpoint}`, options, 10000);
+        if (response.ok) return response;
+        failures.push(`${baseUrl}${endpoint} -> ${response.status}`);
+        if (response.status !== 404) break;
+      } catch (err) {
+        failures.push(`${baseUrl}${endpoint} -> ${err.message}`);
+        break;
+      }
     }
   }
 
-  throw new Error('ML pipeline failed to start: no compatible upload endpoint found');
+  throw new Error(`ML pipeline failed to start. Tried: ${failures.join('; ')}`);
 }
 
 async function fetchMlProgress(scanId) {
   const endpoints = [`/scan_progress/${scanId}`, `/api/scan/${scanId}/progress`];
 
-  for (const endpoint of endpoints) {
-    const response = await fetchWithTimeout(`${ML_SERVICE_URL}${endpoint}`, {}, 5000);
-    if (response.ok) return response;
-    if (response.status !== 404) {
-      throw new Error(`ML progress endpoint ${endpoint} returned status ${response.status}`);
+  for (const baseUrl of ML_SERVICE_URLS) {
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetchWithTimeout(`${baseUrl}${endpoint}`, {}, 5000);
+        if (response.ok) return response;
+        if (response.status !== 404) {
+          throw new Error(`ML progress endpoint ${baseUrl}${endpoint} returned status ${response.status}`);
+        }
+      } catch (err) {
+        if (!['fetch failed', 'This operation was aborted'].includes(err.message)) {
+          throw err;
+        }
+        break;
+      }
     }
   }
 
