@@ -200,7 +200,7 @@ def medicine_record(row):
 
 def seed_batches(cur):
     fixtures = [
-        ("batch-calpol-500-001", "med-33928", "GP43210", "08/2024", "07/2027", "CALPOL500-GP43210-IN"),
+        ("batch-calpol-500-001", "med-33928", "GP43210", "08/2024", "07/2027", "8901234567890"),
         ("batch-calpol-650-001", "med-33933", "GP51009", "02/2025", "01/2028", "CALPOL650-GP51009-IN"),
         ("batch-crocin-001", "med-33924", "BT4521", "03/2025", "02/2028", "CROCIN-BT4521-IN"),
         ("batch-dolo-650-001", "med-58235", "GP99210", "05/2024", "04/2027", "DOLO650-GP99210-ML-IN"),

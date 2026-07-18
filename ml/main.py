@@ -7,6 +7,7 @@ import sqlite3
 import difflib
 import ssl
 import multiprocessing as mp
+import importlib.util
 import numpy as np
 import cv2
 from PIL import Image
@@ -17,13 +18,25 @@ import easyocr
 ssl._create_default_https_context = ssl._create_unverified_context
 
 try:
+    if os.name == "nt" and hasattr(os, "add_dll_directory"):
+        pyzbar_spec = importlib.util.find_spec("pyzbar")
+        if pyzbar_spec and pyzbar_spec.submodule_search_locations:
+            os.add_dll_directory(str(pyzbar_spec.submodule_search_locations[0]))
     from pyzbar.pyzbar import decode as zbar_decode
     HAS_ZBAR = True
 except Exception:
     HAS_ZBAR = False
     def zbar_decode(*args, **kwargs):
         return []
-    print("ZBar not available. Falling back to OpenCV QR detection.")
+    print("ZBar not available.")
+
+try:
+    import zxingcpp
+    HAS_ZXING = True
+except Exception:
+    HAS_ZXING = False
+    zxingcpp = None
+    print("ZXing-C++ not available. Falling back to OpenCV QR detection.")
 
 app = FastAPI(title="MedSecure ML Inference Service v5 (12-Stage Pipeline)")
 
@@ -585,6 +598,72 @@ def decode_barcodes_opencv(gray):
             decoded.append(value)
     return decoded
 
+def decode_barcodes_zxing(img):
+    if not HAS_ZXING:
+        return []
+    results = zxingcpp.read_barcodes(img)
+    decoded = []
+    for result in results:
+        text = getattr(result, "text", None)
+        if text:
+            decoded.append(text)
+    return decoded
+
+def valid_ean13(value):
+    if not re.fullmatch(r"\d{13}", value or ""):
+        return False
+    digits = [int(ch) for ch in value]
+    checksum = (10 - ((sum(digits[0:12:2]) + 3 * sum(digits[1:12:2])) % 10)) % 10
+    return checksum == digits[12]
+
+def normalize_barcode_digit_candidates(text):
+    digits = re.sub(r"\D", "", text or "")
+    candidates = []
+    for match in re.findall(r"\d{8,18}", digits):
+        candidates.extend(match[i:i + 13] for i in range(0, max(0, len(match) - 12)))
+        candidates.append(match)
+    valid = [candidate for candidate in candidates if valid_ean13(candidate)]
+    if valid:
+        return valid
+    return [candidate for candidate in candidates if 8 <= len(candidate) <= 18]
+
+def decode_barcode_digits_with_ocr(img):
+    h, w = img.shape[:2]
+    regions = [
+        img[:, int(w * 0.65):],
+        img[:, int(w * 0.72):],
+        img[int(h * 0.2):int(h * 0.95), int(w * 0.65):],
+    ]
+    candidates = []
+    for region in regions:
+        if region.size == 0:
+            continue
+        variants = [
+            region,
+            cv2.rotate(region, cv2.ROTATE_90_CLOCKWISE),
+            cv2.rotate(region, cv2.ROTATE_90_COUNTERCLOCKWISE),
+        ]
+        for variant in variants:
+            gray = cv2.cvtColor(variant, cv2.COLOR_BGR2GRAY) if len(variant.shape) == 3 else variant
+            try:
+                results = reader.readtext(
+                    gray,
+                    detail=1,
+                    paragraph=False,
+                    decoder="greedy",
+                    text_threshold=0.35,
+                    low_text=0.2,
+                    width_ths=1.2
+                )
+            except Exception:
+                continue
+            text = " ".join(result[1] for result in results if len(result) >= 2)
+            candidates.extend(normalize_barcode_digit_candidates(text))
+    if not candidates:
+        return []
+    candidates.sort(key=len, reverse=True)
+    return [candidates[0]]
+
 def decode_barcodes_worker(gray, queue):
     try:
         barcodes = zbar_decode(gray)
@@ -635,23 +714,34 @@ def verify_barcode(img, batch_row, med_row):
     gray = cv2.cvtColor(scan_img, cv2.COLOR_BGR2GRAY)
     if HAS_ZBAR:
         decoded, decode_error = decode_barcodes_with_timeout(gray)
+        decoder_name = "ZBar"
+    elif HAS_ZXING:
+        decoded, decode_error = decode_barcodes_zxing(scan_img), None
+        decoder_name = "ZXing-C++"
     else:
         decoded, decode_error = decode_barcodes_opencv(gray), None
+        decoder_name = "OpenCV QR fallback"
 
     if decode_error:
         print(f"Barcode decoding skipped: {decode_error}")
         return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": decode_error, "reason": "Barcode verification skipped", "score": 85 if not req else 70}
 
     if not decoded:
-        note = "Barcode not detected" if HAS_ZBAR else "Barcode not detected by OpenCV QR fallback"
+        ocr_decoded = decode_barcode_digits_with_ocr(scan_img)
+        if ocr_decoded:
+            decoded = ocr_decoded
+            decoder_name = "OCR barcode digit fallback"
+
+    if not decoded:
+        note = f"Barcode not detected by {decoder_name}"
         return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": note, "reason": "Barcode not detected; verification skipped", "score": 85 if not req else 70}
     
     expected = (batch_row.get("barcode_value") or "") if batch_row else ""
     if expected and expected in decoded:
-        return {"status": "passed", "required": req, "found": True, "match": True, "ocr_value": decoded[0], "decoded_value": decoded[0], "stored_value": expected, "note": "Barcode verified", "reason": "Barcode Verified", "score": 100}
+        return {"status": "passed", "required": req, "found": True, "match": True, "ocr_value": decoded[0], "decoded_value": decoded[0], "stored_value": expected, "note": f"Barcode verified by {decoder_name}", "reason": "Barcode Verified", "score": 100}
     if expected:
-        return {"status": "failed", "required": req, "found": True, "match": False, "ocr_value": decoded[0], "decoded_value": decoded[0], "stored_value": expected, "note": "Barcode mismatch", "reason": "Barcode Mismatch", "score": 0}
-    return {"status": "skipped", "required": req, "found": True, "match": None, "ocr_value": decoded[0], "decoded_value": decoded[0], "stored_value": None, "note": "Barcode decoded but no database barcode value is recorded", "reason": "Barcode database comparison skipped", "score": 90}
+        return {"status": "failed", "required": req, "found": True, "match": False, "ocr_value": decoded[0], "decoded_value": decoded[0], "stored_value": expected, "note": f"Barcode mismatch; decoded by {decoder_name}", "reason": "Barcode Mismatch", "score": 0}
+    return {"status": "skipped", "required": req, "found": True, "match": None, "ocr_value": decoded[0], "decoded_value": decoded[0], "stored_value": None, "note": f"Barcode decoded by {decoder_name}, but no database barcode value is recorded", "reason": "Barcode database comparison skipped", "score": 90}
 
 # --- Stage 7: AI Packaging ---
 def analyze_packaging(img):
@@ -1147,11 +1237,12 @@ async def get_scan_progress(scan_id: str):
 
 @app.get("/health")
 async def health_check():
+    barcode_decoder = "zbar" if HAS_ZBAR else ("zxing_cpp" if HAS_ZXING else "opencv_qr_fallback")
     return {
         "status": "ok",
         "service": "medsecure-ml-inference-12-stage",
         "ocr": "easyocr",
-        "barcode_decoder": "zbar" if HAS_ZBAR else "opencv_qr_fallback",
+        "barcode_decoder": barcode_decoder,
         "build": "ocr-name-fix-2026-07-15"
     }
 
