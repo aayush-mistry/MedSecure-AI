@@ -82,7 +82,7 @@ class ProgressResponse(BaseModel):
     status: str
 
 
-_DB_CACHE = {"medicines": [], "batches": [], "generic_names": set()}
+_DB_CACHE = {"medicines": [], "batches": [], "generic_names": set(), "manufacturer_names": set()}
 
 def init_db_cache():
     if _DB_CACHE["medicines"]: return
@@ -94,6 +94,13 @@ def init_db_cache():
             g = m.get("generic_name")
             if g and g.strip():
                 _DB_CACHE["generic_names"].add(g.strip())
+            mfr = m.get("manufacturer_name") or m.get("manufacturer")
+            if mfr and mfr.strip():
+                _DB_CACHE["manufacturer_names"].add(mfr.strip())
+        for b in _DB_CACHE["batches"]:
+            mfr = b.get("manufacturer")
+            if mfr and mfr.strip():
+                _DB_CACHE["manufacturer_names"].add(mfr.strip())
         conn.close()
     except Exception as e:
         print(f"Failed to init DB cache: {e}")
@@ -411,16 +418,38 @@ def extract_ocr_fields(ocr_results):
     )
 
     for line in lines:
-        mfr = re.search(r'(?:mfg\.?\s*by|manufactured\s*by)\s*[:\-]*\s*(.+)', line, re.IGNORECASE)
+        mfr = re.search(r'(?:mfg\.?\s*by|manufactured\s*by|manufacturer)\s*[:\-]*\s*(.+)', line, re.IGNORECASE)
         if mfr:
-            manufacturer = re.split(r'\b(?:batch|exp|expiry|mrp|mfg\s*date)\b', mfr.group(1), flags=re.IGNORECASE)[0].strip()
+            manufacturer = re.split(r'\b(?:batch|exp|expiry|mrp|mfg\s*date|for\s*test)\b', mfr.group(1), flags=re.IGNORECASE)[0].strip()
             field_details["manufacturer"] = field_result(manufacturer[:80], confidence_for_value(ocr_results, line))
             break
     if not is_detected(field_details["manufacturer"]["value"]):
-        mfr = re.search(r'(?:mfg\.?\s*by|manufactured\s*by)\s*[:\-]*\s*(.+?)(?=\s+(?:batch|exp|expiry|mrp|mfg\s*date)\b|$)', full_text, re.IGNORECASE)
+        mfr = re.search(r'(?:mfg\.?\s*by|manufactured\s*by|manufacturer)\s*[:\-]*\s*(.+?)(?=\s+(?:batch|exp|expiry|mrp|mfg\s*date|for\s*test)\b|$)', full_text, re.IGNORECASE)
         if mfr:
             manufacturer = mfr.group(1).strip()
             field_details["manufacturer"] = field_result(manufacturer[:80], confidence_for_value(ocr_results, manufacturer))
+
+    # Fallback to Fuzzy DB Matching for Manufacturer
+    if not is_detected(field_details["manufacturer"]["value"]):
+        best_mfr_score = 0
+        best_mfr = None
+        for mfr_name in _DB_CACHE["manufacturer_names"]:
+            mfr_lower = mfr_name.lower()
+            if mfr_lower in lower_full_text:
+                if 1.0 > best_mfr_score:
+                    best_mfr = mfr_name
+                    best_mfr_score = 1.0
+                break
+            tokens = [t for t in mfr_lower.split() if len(t) > 3]
+            if tokens:
+                match_count = sum(1 for t in tokens if t in lower_full_text)
+                if match_count / len(tokens) >= 0.6:
+                    if 0.8 > best_mfr_score:
+                        best_mfr = mfr_name
+                        best_mfr_score = 0.8
+        if best_mfr:
+            field_details["manufacturer"] = field_result(best_mfr, best_mfr_score, "ocr_fuzzy")
+            print(f"[OCR] Manufacturer Fuzzy Extracted: {best_mfr} (score: {best_mfr_score})")
 
     fields = {key: detail["value"] for key, detail in field_details.items()}
     fields["mfr"] = fields["manufacturer"]
@@ -1094,25 +1123,18 @@ def run_full_pipeline(scan_id, file_path):
         timings["Batch Verification"] = time.perf_counter() - t0
         ocr_public = {k: v for k, v in fields.items() if not k.startswith("_") and k != "mfr"}
 
-        # Parallelize Stages 6 to 11
+        # Sequential Verifications (Faster than ThreadPool due to Python GIL)
         t0 = time.perf_counter()
         set_progress(scan_id, "verification_modules", 5, 0.50)
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            fut_barcode = executor.submit(safe_stage, "Barcode verification", {"status": "failed", "reason": "Barcode verification failed", "score": 0, "match": None, "required": False, "found": False}, lambda: verify_barcode(enhanced_img, batch_row, med_row))
-            fut_packaging = executor.submit(safe_stage, "Packaging analysis", {"status": "failed", "reason": "Packaging analysis failed", "score": 0}, lambda: analyze_packaging(enhanced_img))
-            fut_logo = executor.submit(safe_stage, "Logo verification", {"status": "warning", "reason": "Logo verification skipped", "score": 75}, lambda: verify_logo(enhanced_img, med_row))
-            fut_color = executor.submit(safe_stage, "Color verification", {"status": "failed", "reason": "Color verification failed", "score": 0}, lambda: verify_color(enhanced_img, med_row))
-            fut_layout = executor.submit(safe_stage, "Layout verification", {"status": "failed", "reason": "Layout verification failed", "score": 0}, lambda: verify_layout(ocr_res, med_row))
-            fut_tamper = executor.submit(safe_stage, "Tamper detection", {"status": "failed", "reason": "Tamper detection failed", "score": 0}, lambda: detect_tampering(enhanced_img))
-            
-            res_barcode = fut_barcode.result()
-            res_packaging = fut_packaging.result()
-            res_logo = fut_logo.result()
-            res_color = fut_color.result()
-            res_layout = fut_layout.result()
-            res_tamper = fut_tamper.result()
-            
-        timings["Parallel Verifications (Barcode, Logo, Color, etc)"] = time.perf_counter() - t0
+        
+        res_barcode = safe_stage("Barcode verification", {"status": "failed", "reason": "Barcode verification failed", "score": 0, "match": None, "required": False, "found": False}, lambda: verify_barcode(enhanced_img, batch_row, med_row))
+        res_packaging = safe_stage("Packaging analysis", {"status": "failed", "reason": "Packaging analysis failed", "score": 0}, lambda: analyze_packaging(enhanced_img))
+        res_logo = safe_stage("Logo verification", {"status": "warning", "reason": "Logo verification skipped", "score": 75}, lambda: verify_logo(enhanced_img, med_row))
+        res_color = safe_stage("Color verification", {"status": "failed", "reason": "Color verification failed", "score": 0}, lambda: verify_color(enhanced_img, med_row))
+        res_layout = safe_stage("Layout verification", {"status": "failed", "reason": "Layout verification failed", "score": 0}, lambda: verify_layout(ocr_res, med_row))
+        res_tamper = safe_stage("Tamper detection", {"status": "failed", "reason": "Tamper detection failed", "score": 0}, lambda: detect_tampering(enhanced_img))
+
+        timings["Sequential Verifications (Barcode, Logo, Color, etc)"] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
         set_progress(scan_id, "confidence_scoring", 11, 0.95)
@@ -1140,6 +1162,24 @@ def run_full_pipeline(scan_id, file_path):
             "layout": res_layout,
             "tamper": res_tamper
         })
+        
+        # Frontend UI expects these specific fields in signal_breakdown
+        def get_score(field_res):
+            if not field_res: return None
+            if "confidence" in field_res:
+                return int(field_res["confidence"] * 100)
+            if field_res.get("match") is True:
+                return 100
+            if field_res.get("match") is False:
+                return 0
+            return None
+
+        final_report["breakdown"]["manufacturer"] = get_score(verification_results.get("manufacturer"))
+        final_report["breakdown"]["manufacturing_date"] = get_score(verification_results.get("manufacturing_date"))
+        final_report["breakdown"]["expiry_date"] = get_score(verification_results.get("expiry_date"))
+        final_report["breakdown"]["batch_number"] = get_score(verification_results.get("batch_number"))
+        final_report["breakdown"]["medicine_name"] = get_score(verification_results.get("medicine_name"))
+        final_report["breakdown"]["image_analysis"] = int(res_tamper.get("score", 0))
         timings["Authenticity Score"] = time.perf_counter() - t0
         
         timings["Total Time"] = time.perf_counter() - total_start
