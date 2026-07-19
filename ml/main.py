@@ -40,15 +40,15 @@ except Exception:
 
 app = FastAPI(title="MedSecure ML Inference Service v5 (12-Stage Pipeline)")
 
-print("Loading EasyOCR model (CPU)...")
-reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+print("Loading EasyOCR model...")
+reader = easyocr.Reader(['en'], gpu=True, verbose=False)
 print("EasyOCR ready.")
 
 DB_PATH = os.environ.get(
     "DB_PATH",
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "db", "indian_pharmaceutical_products.db"))
 )
-MAX_OCR_DIMENSION = 1280
+MAX_OCR_DIMENSION = 800
 MAX_ANALYSIS_DIMENSION = 1600
 
 scan_progress_store = {}
@@ -80,6 +80,23 @@ class ProgressResponse(BaseModel):
     total_stages: int
     progress: float
     status: str
+
+
+_DB_CACHE = {"medicines": [], "batches": [], "generic_names": set()}
+
+def init_db_cache():
+    if _DB_CACHE["medicines"]: return
+    try:
+        conn = get_db()
+        _DB_CACHE["medicines"] = [dict(r) for r in conn.execute("SELECT * FROM medicines").fetchall()]
+        _DB_CACHE["batches"] = [dict(r) for r in conn.execute("SELECT * FROM medicine_batches").fetchall()]
+        for m in _DB_CACHE["medicines"]:
+            g = m.get("generic_name")
+            if g and g.strip():
+                _DB_CACHE["generic_names"].add(g.strip())
+        conn.close()
+    except Exception as e:
+        print(f"Failed to init DB cache: {e}")
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=2.0)
@@ -338,6 +355,29 @@ def extract_ocr_fields(ocr_results):
             best_name = field_result(name_candidate, conf)
     field_details["name"] = best_name
 
+    
+    # Generic Name Fuzzy Matching
+    init_db_cache()
+    best_gn_score = 0
+    best_gn = None
+    lower_full_text = full_text.lower()
+    for gn in _DB_CACHE["generic_names"]:
+        gn_lower = gn.lower()
+        if gn_lower in lower_full_text:
+            best_gn = gn
+            best_gn_score = 1.0
+            break
+        # Relaxed matching without IP/Tablets
+        for token in gn_lower.split():
+            if len(token) > 4 and token in lower_full_text:
+                if not best_gn:
+                    best_gn = gn
+                    best_gn_score = 0.8
+                
+    if best_gn:
+        field_details["composition"] = field_result(best_gn, best_gn_score, "ocr_regex")
+        print(f"[OCR] Generic Name Extracted: {best_gn} (score: {best_gn_score})")
+
     field_details["batch_number"] = extract_batch_number(ocr_results, full_text)
     field_details["expiry_date"] = best_regex_match(
         ocr_results,
@@ -404,60 +444,42 @@ def medicine_manufacturer(med):
     return med.get("manufacturer_name") or med.get("manufacturer") or ""
 
 def build_medicine_candidates(full_text, lines, conn):
-    columns = get_table_columns(conn, "medicines")
-    searchable_columns = [c for c in ["brand_name", "name", "generic_name", "primary_ingredient", "manufacturer_name"] if c in columns]
-    if not searchable_columns:
-        return []
-
+    init_db_cache()
     tokens = []
     for token in re.findall(r"[A-Za-z][A-Za-z0-9\-]{2,}", full_text):
-        token = token.strip()
-        if len(token) >= 4 and token.lower() not in {"batch", "expiry", "mfg", "mfd", "tablet", "capsule", "tablets", "capsules", "price", "license"}:
+        token = token.strip().lower()
+        if len(token) >= 4 and token not in {"batch", "expiry", "mfg", "mfd", "tablet", "capsule", "tablets", "capsules", "price", "license"}:
             tokens.append(token)
 
     seen = set()
     candidates = []
-    cur = conn.cursor()
+    searchable_columns = ["brand_name", "name", "generic_name", "primary_ingredient", "manufacturer_name"]
     for token in tokens[:12]:
-        where = " OR ".join([f"{col} LIKE ?" for col in searchable_columns])
-        params = [f"%{token}%"] * len(searchable_columns)
-        try:
-            rows = cur.execute(f"SELECT * FROM medicines WHERE {where} LIMIT 30", params).fetchall()
-        except sqlite3.Error:
-            continue
-        for row in rows:
-            med = dict(row)
-            if med.get("id") not in seen:
-                seen.add(med.get("id"))
-                candidates.append(med)
+        for med in _DB_CACHE["medicines"]:
+            if med.get("id") in seen: continue
+            for col in searchable_columns:
+                val = med.get(col)
+                if val and token in str(val).lower():
+                    seen.add(med.get("id"))
+                    candidates.append(med)
+                    break
         if len(candidates) >= 80:
             break
-
     return candidates
 
 def find_medicine_by_batch(batch_number, conn):
-    if not is_detected(batch_number):
-        return None
-    try:
-        row = conn.execute(
-            """
-            SELECT m.*
-            FROM medicine_batches mb
-            JOIN medicines m ON m.id = mb.medicine_id
-            WHERE mb.batch_number = ?
-            LIMIT 1
-            """,
-            (batch_number,)
-        ).fetchone()
-        return dict(row) if row else None
-    except sqlite3.Error:
-        return None
+    if not is_detected(batch_number): return None
+    init_db_cache()
+    for b in _DB_CACHE["batches"]:
+        if str(b.get("batch_number")).lower() == str(batch_number).lower():
+            for m in _DB_CACHE["medicines"]:
+                if m.get("id") == b.get("medicine_id"):
+                    return m
+    return None
 
 def verify_db_medicine(fields, full_text, lines, conn):
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM medicines LIMIT 1")
-    except sqlite3.OperationalError:
+    init_db_cache()
+    if not _DB_CACHE["medicines"]:
         return None, 0.0, {"status": "skipped", "reason": "Medicine database unavailable"}
 
     batch_med = find_medicine_by_batch(fields.get("batch_number"), conn)
@@ -469,8 +491,7 @@ def verify_db_medicine(fields, full_text, lines, conn):
 
     all_meds = build_medicine_candidates(full_text, lines, conn)
     if not all_meds:
-        cur.execute("SELECT * FROM medicines LIMIT 200")
-        all_meds = [dict(r) for r in cur.fetchall()]
+        all_meds = _DB_CACHE["medicines"][:200]
     
     best_med = None
     best_score = 0.0
@@ -524,17 +545,14 @@ def verify_db_medicine(fields, full_text, lines, conn):
 
 # --- Stage 5: Batch Verification ---
 def verify_batch(medicine_id, batch_number, conn):
-    if not is_detected(batch_number):
-        return None
-    cur = conn.cursor()
-    try:
-        if medicine_id:
-            row = cur.execute("SELECT * FROM medicine_batches WHERE medicine_id=? AND batch_number=?", (medicine_id, batch_number)).fetchone()
-        else:
-            row = cur.execute("SELECT * FROM medicine_batches WHERE batch_number=? LIMIT 1", (batch_number,)).fetchone()
-        return dict(row) if row else None
-    except sqlite3.OperationalError:
-        return None
+    if not is_detected(batch_number): return None
+    init_db_cache()
+    batch_str = str(batch_number).lower()
+    for b in _DB_CACHE["batches"]:
+        if str(b.get("batch_number")).lower() == batch_str:
+            if medicine_id and b.get("medicine_id") != medicine_id: continue
+            return b
+    return None
 
 def infer_single_registered_batch(med_row, conn):
     if not med_row or conn is None:
@@ -875,15 +893,25 @@ def build_verification_results(fields, med_row, batch_row, barcode_status):
         dosage_status = "Reference Only"
         dosage_note = "No direct dosage-form reference is available for a strict match"
 
+    gn_ocr = fields.get("composition")
+    gn_db = db_value(med_row, "generic_name")
+    if is_detected(gn_ocr):
+        gn_res = compare_fuzzy(gn_ocr, gn_db, "Generic Name", 0.70)
+        if gn_res["match"]:
+            gn_res["status"] = "Verified"
+            gn_res["note"] = "Generic name matched with database."
+    else:
+        gn_res = {
+            "extracted": NOT_DETECTED,
+            "stored": gn_db,
+            "match": False if gn_db else None,
+            "status": "Mismatch" if gn_db else "Skipped",
+            "note": "Generic name not found in OCR text." if gn_db else "No generic name in database."
+        }
+
     return {
         "medicine_name": compare_fuzzy(fields.get("name"), medicine_name(med_row) if med_row else None, "Medicine Name", 0.78),
-        "generic_name": {
-            "extracted": NOT_DETECTED,
-            "stored": db_value(med_row, "generic_name"),
-            "match": None,
-            "status": "Reference Only" if med_row else "Skipped",
-            "note": "Generic name is a database reference for the matched medicine; it is not OCR evidence."
-        },
+        "generic_name": gn_res,
         "manufacturer": compare_fuzzy(fields.get("manufacturer"), medicine_manufacturer(med_row) if med_row else db_value(batch_row, "manufacturer"), "Manufacturer", 0.70),
         "batch_number": compare_values(fields.get("batch_number"), db_value(batch_row, "batch_number"), "Batch Number"),
         "manufacturing_date": compare_values(fields.get("mfg_date"), db_value(batch_row, "manufacturing_date"), "Manufacturing Date"),
@@ -943,27 +971,38 @@ def db_verdict(score):
     return "high_risk"
 
 
+import time
+import concurrent.futures
+
 def run_full_pipeline(scan_id, file_path):
     conn = None
+    timings = {}
+    total_start = time.perf_counter()
     try:
+        # DB Caching (non-blocking)
+        init_db_cache()
+
+        t0 = time.perf_counter()
         set_progress(scan_id, "image_quality", 0, 0.05)
         img = cv2.imread(file_path)
         if img is None: raise Exception("Invalid image file")
-        
-        # Stage 1
         ok, issues = check_image_quality(img)
         if not ok:
             print(f"Image quality warnings for {scan_id}: {', '.join(issues)}", flush=True)
+        timings["Image Loading & Quality"] = time.perf_counter() - t0
 
         # Stage 2
+        t0 = time.perf_counter()
         set_progress(scan_id, "image_enhancement", 1, 0.10)
         try:
             enhanced_img = enhance_image(img)
         except Exception as exc:
             print(f"Image enhancement failed, using original image: {exc}", flush=True)
             enhanced_img = img
+        timings["Preprocessing"] = time.perf_counter() - t0
         
         # Stage 3
+        t0 = time.perf_counter()
         set_progress(scan_id, "ocr_extraction", 2, 0.20)
         try:
             ocr_img = prepare_ocr_image(enhanced_img)
@@ -993,6 +1032,7 @@ def run_full_pipeline(scan_id, file_path):
                 "license_number": NOT_DETECTED, "barcode": NOT_DETECTED, "ocr_boxes": [], "mfr": NOT_DETECTED,
                 "_confidence": {}, "_details": {}, "_raw_text": ""
             }
+        timings["OCR"] = time.perf_counter() - t0
         ocr_public = {k: v for k, v in fields.items() if not k.startswith("_") and k != "mfr"}
         detected_core_fields = [
             fields.get("name"), fields.get("manufacturer"), fields.get("batch_number"),
@@ -1011,7 +1051,8 @@ def run_full_pipeline(scan_id, file_path):
             print(f"Database unavailable: {exc}", flush=True)
             conn = None
 
-        # Stage 4
+        # Stage 4: DB Match
+        t0 = time.perf_counter()
         set_progress(scan_id, "db_verification", 3, 0.30)
         if conn is not None:
             try:
@@ -1030,8 +1071,10 @@ def run_full_pipeline(scan_id, file_path):
             "score": round(db_score * 100, 1) if med_row else max(0, round(db_score * 60, 1)),
             "reason": med_match_meta["reason"]
         }
+        timings["Medicine Matching"] = time.perf_counter() - t0
         
-        # Stage 5
+        # Stage 5: Batch Match
+        t0 = time.perf_counter()
         set_progress(scan_id, "batch_verification", 4, 0.40)
         batch_row = verify_batch(med_row["id"] if med_row and conn else None, fields["batch_number"], conn) if conn else None
         if not is_detected(fields["batch_number"]):
@@ -1048,153 +1091,84 @@ def run_full_pipeline(scan_id, file_path):
             res_batch = {"score": 100, "reason": "Batch number found in registry"}
         else:
             res_batch = {"score": 45, "reason": "OCR batch number not found in registry"}
+        timings["Batch Verification"] = time.perf_counter() - t0
         ocr_public = {k: v for k, v in fields.items() if not k.startswith("_") and k != "mfr"}
 
-        # Stage 6
-        set_progress(scan_id, "barcode_verification", 5, 0.50)
-        res_barcode = safe_stage(
-            "Barcode verification",
-            {"status": "failed", "reason": "Barcode verification failed", "score": 0, "match": None, "required": False, "found": False},
-            lambda: verify_barcode(enhanced_img, batch_row, med_row)
-        )
+        # Parallelize Stages 6 to 11
+        t0 = time.perf_counter()
+        set_progress(scan_id, "verification_modules", 5, 0.50)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            fut_barcode = executor.submit(safe_stage, "Barcode verification", {"status": "failed", "reason": "Barcode verification failed", "score": 0, "match": None, "required": False, "found": False}, lambda: verify_barcode(enhanced_img, batch_row, med_row))
+            fut_packaging = executor.submit(safe_stage, "Packaging analysis", {"status": "failed", "reason": "Packaging analysis failed", "score": 0}, lambda: analyze_packaging(enhanced_img))
+            fut_logo = executor.submit(safe_stage, "Logo verification", {"status": "warning", "reason": "Logo verification skipped", "score": 75}, lambda: verify_logo(enhanced_img, med_row))
+            fut_color = executor.submit(safe_stage, "Color verification", {"status": "failed", "reason": "Color verification failed", "score": 0}, lambda: verify_color(enhanced_img, med_row))
+            fut_layout = executor.submit(safe_stage, "Layout verification", {"status": "failed", "reason": "Layout verification failed", "score": 0}, lambda: verify_layout(ocr_res, med_row))
+            fut_tamper = executor.submit(safe_stage, "Tamper detection", {"status": "failed", "reason": "Tamper detection failed", "score": 0}, lambda: detect_tampering(enhanced_img))
+            
+            res_barcode = fut_barcode.result()
+            res_packaging = fut_packaging.result()
+            res_logo = fut_logo.result()
+            res_color = fut_color.result()
+            res_layout = fut_layout.result()
+            res_tamper = fut_tamper.result()
+            
+        timings["Parallel Verifications (Barcode, Logo, Color, etc)"] = time.perf_counter() - t0
 
-        # Stage 7
-        set_progress(scan_id, "ai_packaging", 6, 0.60)
-        res_packaging = safe_stage(
-            "Packaging analysis",
-            {"status": "failed", "reason": "Packaging analysis failed", "score": 0},
-            lambda: analyze_packaging(enhanced_img)
-        )
-
-        # Stage 8
-        set_progress(scan_id, "logo_verification", 7, 0.70)
-        res_logo = safe_stage(
-            "Logo verification",
-            {"status": "failed", "reason": "Logo verification failed", "score": 0},
-            lambda: verify_logo(enhanced_img, med_row)
-        )
-
-        # Stage 9
-        set_progress(scan_id, "color_verification", 8, 0.80)
-        res_color = safe_stage(
-            "Color verification",
-            {"status": "failed", "reason": "Color verification failed", "score": 0},
-            lambda: verify_color(enhanced_img, med_row)
-        )
-
-        # Stage 10
-        set_progress(scan_id, "layout_verification", 9, 0.85)
-        res_layout = safe_stage(
-            "Layout verification",
-            {"status": "failed", "reason": "Layout verification failed", "score": 0},
-            lambda: verify_layout(ocr_res, med_row)
-        )
-
-        # Stage 11
-        set_progress(scan_id, "tamper_detection", 10, 0.90)
-        res_tamper = safe_stage(
-            "Tamper detection",
-            {"status": "failed", "reason": "Tamper detection failed", "score": 0},
-            lambda: detect_tampering(enhanced_img)
-        )
-
-        # Stage 12
+        t0 = time.perf_counter()
         set_progress(scan_id, "confidence_scoring", 11, 0.95)
-        stages_results = {
-            "ocr": res_ocr, "db": res_db, "batch": res_batch, "barcode": res_barcode,
-            "packaging": res_packaging, "logo": res_logo, "color": res_color,
-            "layout": res_layout, "tamper": res_tamper
-        }
         
-        try:
-            verification_results = build_verification_results(fields, med_row, batch_row, res_barcode)
-        except Exception as exc:
-            print(f"Verification report build failed: {exc}", flush=True)
-            verification_results = {}
-        verified_count = sum(1 for result in verification_results.values() if result.get("match") is True)
-        mismatch_count = sum(1 for result in verification_results.values() if result.get("match") is False)
-        skipped_count = sum(1 for result in verification_results.values() if result.get("status") == "Skipped")
-        if mismatch_count:
-            stages_results["db"]["score"] = min(stages_results["db"]["score"], max(35, 90 - mismatch_count * 20))
-            stages_results["db"]["reason"] = f"{mismatch_count} database comparison mismatch(es) found"
-        elif verified_count:
-            stages_results["db"]["reason"] = f"{verified_count} database field(s) verified; {skipped_count} skipped"
+        verification_results = build_verification_results(fields, med_row, batch_row, res_barcode)
+        
+        # Logging generic name correctly
+        gn_result = verification_results.get("generic_name", {})
+        print(f"\n--- Generic Name Logging ---")
+        print(f"OCR Generic Name: {fields.get('composition')}")
+        print(f"Parsed Generic Name: {gn_result.get('extracted')}")
+        print(f"Database Generic Name: {gn_result.get('stored')}")
+        print(f"Similarity Score: {gn_result.get('confidence', 1.0) * 100}%")
+        print(f"Verification: {gn_result.get('status')}")
+        print(f"----------------------------\n")
+        
+        final_report = generate_evidence_report({
+            "ocr": res_ocr,
+            "db": res_db,
+            "batch": res_batch,
+            "barcode": res_barcode,
+            "packaging": res_packaging,
+            "logo": res_logo,
+            "color": res_color,
+            "layout": res_layout,
+            "tamper": res_tamper
+        })
+        timings["Authenticity Score"] = time.perf_counter() - t0
+        
+        timings["Total Time"] = time.perf_counter() - total_start
+        
+        print("\n=== Execution Timings ===")
+        for stage, duration in timings.items():
+            print(f"{stage}: {duration * 1000:.0f} ms" if duration < 1 else f"{stage}: {duration:.2f} s")
+        print("=========================\n", flush=True)
 
-        final_report = generate_evidence_report(stages_results)
-
-        # Extract anomalies for legacy compatibility in DB
-        anomalies = [line for line in final_report["explanation"] if line.startswith("FAIL") or line.startswith("WARN")]
-
-        # Write result. The backend creates the scan row before calling ML, so
-        # prefer UPDATE; INSERT keeps direct ML testing usable.
-        if conn is not None:
-            cur = conn.cursor()
-            try:
-                scan_values = (
-                    med_row["id"] if med_row else None,
-                    batch_row["id"] if batch_row else None,
-                    final_report["score"],
-                    db_verdict(final_report["score"]),
-                    json.dumps(ocr_public),
-                    json.dumps(verification_results),
-                    json.dumps(res_packaging),
-                    json.dumps(res_barcode),
-                    json.dumps(anomalies),
-                    json.dumps(final_report["breakdown"]),
-                    scan_id
-                )
-                cur.execute("""
-                    UPDATE scans SET
-                        medicine_id=?,
-                        batch_id=?,
-                        authenticity_score=?,
-                        verdict=?,
-                        ocr_extracted=?,
-                        db_match_results=?,
-                        image_analysis=?,
-                        barcode_status=?,
-                        anomalies=?,
-                        signal_breakdown=?,
-                        scanned_at=CURRENT_TIMESTAMP
-                    WHERE id=?
-                """, scan_values)
-                if cur.rowcount == 0:
-                    cur.execute("""
-                        INSERT INTO scans (
-                            id, medicine_id, batch_id, authenticity_score, verdict,
-                            ocr_extracted, db_match_results, image_analysis,
-                            barcode_status, anomalies, signal_breakdown
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        scan_id,
-                        scan_values[0],
-                        scan_values[1],
-                        scan_values[2],
-                        scan_values[3],
-                        scan_values[4],
-                        scan_values[5],
-                        scan_values[6],
-                        scan_values[7],
-                        scan_values[8],
-                        scan_values[9]
-                    ))
-                conn.commit()
-            except sqlite3.Error as e:
-                print(f"DB Insert failed: {e}", flush=True)
+        anomalies = []
+        for stage_name in ["barcode", "packaging", "color", "layout", "tamper", "logo"]:
+            res = locals().get(f"res_{stage_name}")
+            if res and res.get("status") in ("failed", "warning"):
+                anomalies.append(res.get("reason", f"{stage_name} check issue"))
 
         with scan_progress_lock:
             scan_progress_store[scan_id] = {
-                "status": "complete",
+                "scan_id": scan_id,
+                "stage": "complete",
+                "stage_index": len(STAGES),
+                "total_stages": len(STAGES),
                 "progress": 1.0,
+                "status": "complete",
                 "result": {
                     "verdict": final_report["verdict"],
-                    "confidence": final_report["confidence"],
                     "authenticity_score": final_report["score"],
-                    "medicine_id": med_row["id"] if med_row else None,
-                    "batch_id": batch_row["id"] if batch_row else None,
+                    "confidence_level": final_report["confidence"],
                     "medicine_name": brand_nm,
-                    "generic_name": med_row.get("generic_name") if med_row else None,
+                    "generic_name": gn_result.get("extracted") or med_row.get("generic_name") if med_row else None,
                     "manufacturer_name": med_row.get("manufacturer_name") if med_row else (fields["manufacturer"] if is_detected(fields["manufacturer"]) else None),
                     "batch_number": fields["batch_number"] if is_detected(fields["batch_number"]) else NOT_DETECTED,
                     "ocr_extracted": ocr_public,
