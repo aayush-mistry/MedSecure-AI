@@ -215,7 +215,7 @@ fastify.get('/api/v1/medicines/:id/batches', async (request, reply) => {
   const med = await query.get('SELECT id FROM medicines WHERE id = ?', [request.params.id]);
   if (!med) return reply.status(404).send({ error: 'Medicine not found' });
   const batches = await query.all(
-    `SELECT * FROM medicine_batches WHERE medicine_id = ? ORDER BY created_at DESC`,
+    `SELECT * FROM medicine_batches WHERE LOWER(medicine_id) = LOWER(?) ORDER BY created_at DESC`,
     [request.params.id]
   );
   return batches;
@@ -520,7 +520,7 @@ async function runMlPipeline(scanId, filePath, relativeUrl, lat, lng) {
     if (verdict === 'high_risk' && result.medicine_id && detectedBatch && detectedBatch !== 'Not Detected') {
       const batch = detectedBatch;
       const existing = await query.get(
-        'SELECT * FROM alerts WHERE medicine_id=? AND batch_number=?',
+        'SELECT * FROM alerts WHERE medicine_id=? AND LOWER(batch_number)=LOWER(?)',
         [result.medicine_id, batch]
       );
       if (existing) {

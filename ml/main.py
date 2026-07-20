@@ -502,7 +502,7 @@ def find_medicine_by_batch(batch_number, conn):
     for b in _DB_CACHE["batches"]:
         if str(b.get("batch_number")).lower() == str(batch_number).lower():
             for m in _DB_CACHE["medicines"]:
-                if m.get("id") == b.get("medicine_id"):
+                if str(m.get("id")).lower() == str(b.get("medicine_id")).lower():
                     return m
     return None
 
@@ -579,7 +579,7 @@ def verify_batch(medicine_id, batch_number, conn):
     batch_str = str(batch_number).lower()
     for b in _DB_CACHE["batches"]:
         if str(b.get("batch_number")).lower() == batch_str:
-            if medicine_id and b.get("medicine_id") != medicine_id: continue
+            if medicine_id and str(b.get("medicine_id")).lower() != str(medicine_id).lower(): continue
             return b
     return None
 
@@ -916,11 +916,22 @@ def build_verification_results(fields, med_row, batch_row, barcode_status):
         except Exception:
             composition = med_row.get("composition")
 
-    dosage_status = "Skipped"
-    dosage_note = "Dosage form not detected by OCR"
-    if is_detected(fields.get("dosage_form")) and (med_row or batch_row):
-        dosage_status = "Reference Only"
-        dosage_note = "No direct dosage-form reference is available for a strict match"
+    dosage_extracted = fields.get("dosage_form", NOT_DETECTED)
+    dosage_stored = db_value(med_row, "dosage_form") or db_value(batch_row, "pack_type")
+    
+    if is_detected(dosage_extracted):
+        dosage_res = compare_fuzzy(dosage_extracted, dosage_stored, "Dosage Form", 0.70)
+        if dosage_res["match"]:
+            dosage_res["status"] = "Verified"
+            dosage_res["note"] = "Dosage form matched with database."
+    else:
+        dosage_res = {
+            "extracted": NOT_DETECTED,
+            "stored": dosage_stored,
+            "match": False if dosage_stored else None,
+            "status": "Mismatch" if dosage_stored else "Skipped",
+            "note": "Dosage form not found in OCR text." if dosage_stored else "No dosage form in database."
+        }
 
     gn_ocr = fields.get("composition")
     gn_db = db_value(med_row, "generic_name")
@@ -947,13 +958,7 @@ def build_verification_results(fields, med_row, batch_row, barcode_status):
         "expiry_date": compare_values(fields.get("expiry_date"), db_value(batch_row, "expiry_date"), "Expiry Date"),
         "mrp": compare_values(fields.get("mrp"), db_value(batch_row, "mrp"), "MRP"),
         "strength": compare_fuzzy(fields.get("strength"), composition, "Strength", 0.65),
-        "dosage_form": {
-            "extracted": fields.get("dosage_form", NOT_DETECTED),
-            "stored": db_value(med_row, "dosage_form") or db_value(batch_row, "pack_type"),
-            "match": None,
-            "status": dosage_status,
-            "note": dosage_note
-        },
+        "dosage_form": dosage_res,
         "composition": compare_fuzzy(fields.get("composition"), composition, "Composition", 0.65),
         "license_number": compare_values(fields.get("license_number"), db_value(batch_row, "manufacturing_license") or db_value(med_row, "cdsco_license"), "License Number"),
         "barcode": {
