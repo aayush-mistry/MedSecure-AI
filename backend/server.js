@@ -751,6 +751,11 @@ fastify.get('/api/v1/health', async () => {
 
 // ─── Start server ─────────────────────────────────────────────────────────────
 
+fastify.setErrorHandler(function (error, request, reply) {
+  this.log.error(error);
+  reply.status(500).send({ error: error.message, stack: error.stack });
+});
+
 try {
   await fastify.listen({ port: PORT, host: '0.0.0.0' });
   console.log(`MedSecure Backend running → http://localhost:${PORT}`);
