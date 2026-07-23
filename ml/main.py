@@ -1203,10 +1203,19 @@ def generate_evidence_report(stages_results, verification_results=None):
         if mismatches:
             # Special case for MRP: price changes are common, lower penalty
             mrp_only = (mismatches == ["mrp"])
-            penalty = len(mismatches) * 5 if mrp_only else len(mismatches) * 15
-            score -= penalty
-            print(f"[SCORING] Mismatches detected: {', '.join(mismatches)}. Applying penalty: -{penalty}", flush=True)
-            explanation.append(f"FAIL: Penalty (-{penalty}) applied for mismatches in: {', '.join(mismatches)}")
+            
+            # If critical identity fields are mismatched, it's a definitive counterfeit
+            critical_identity_mismatches = [m for m in mismatches if m in ("medicine_name", "manufacturer", "batch_number")]
+            
+            if critical_identity_mismatches:
+                score = 0
+                print(f"[SCORING] Critical identity mismatches detected: {', '.join(critical_identity_mismatches)}. Forcing score to 0.", flush=True)
+                explanation.append(f"FAIL: Critical identity mismatch ({', '.join(critical_identity_mismatches)}). Score reduced to 0.")
+            else:
+                penalty = len(mismatches) * 5 if mrp_only else len(mismatches) * 15
+                score -= penalty
+                print(f"[SCORING] Mismatches detected: {', '.join(mismatches)}. Applying penalty: -{penalty}", flush=True)
+                explanation.append(f"FAIL: Penalty (-{penalty}) applied for mismatches in: {', '.join(mismatches)}")
             
         if missing_db:
             print(f"[SCORING] Missing DB records for: {', '.join(missing_db)}", flush=True)
