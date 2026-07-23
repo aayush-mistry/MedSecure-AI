@@ -378,7 +378,7 @@ def extract_ocr_fields(ocr_results):
     # 2. Expiry Date
     field_details["expiry_date"] = best_regex_match(
         ocr_results,
-        r'(?:exp|expiry|use before)(?:\s*date)?\s*[:;\-\.]*\s*((?:\d{1,2}|[OIlZz])(?:[/\-]|(?: \. ))(?:\d{2,4}))',
+        r'(?:exp|expiry|use before|date)?.{0,20}?((?:\d{1,2}|[a-zA-Z]{3}|[OIlZz])[\s/\-\.,:;3]{1,2}(?:\d{2,4}))',
         normalizer=normalize_date,
         full_text=full_text
     )
@@ -387,7 +387,7 @@ def extract_ocr_fields(ocr_results):
     # 3. Manufacturing Date
     field_details["mfg_date"] = best_regex_match(
         ocr_results,
-        r'(?:mfg|mfd)(?:\s*date)?\s*[:;\-\.]*\s*((?:\d{1,2}|[OIlZz])(?:[/\-]|(?: \. ))(?:\d{2,4}))',
+        r'(?:mfg|mfd)(?:\s*date)?.{0,20}?((?:\d{1,2}|[a-zA-Z]{3}|[OIlZz])[\s/\-\.,]+(?:\d{2,4}))',
         normalizer=normalize_date,
         full_text=full_text
     )
@@ -396,16 +396,12 @@ def extract_ocr_fields(ocr_results):
     # 4. MRP
     field_details["mrp"] = best_regex_match(
         ocr_results,
-        r'(?:mrp|price|max retail)\s*[:;\-]*\s*(?:rs\.?|inr|₹|r\$|r5|e|€)?\s*[:;\-]*\s*(\d+\.\d{2})',
+        r'(?:mrp|rrp|price|retail|taxes)[^\d]{0,15}?(\d{1,5}(?:[\.,]\d{2})?)',
         full_text=full_text
     )
-    if not is_detected(field_details["mrp"]["value"]):
-        # Fallback to integer MRP
-        field_details["mrp"] = best_regex_match(
-            ocr_results,
-            r'(?:mrp|price|max retail)\s*[:;\-]*\s*(?:rs\.?|inr|₹|r\$|r5|e|€)?\s*[:;\-]*\s*(\d+)',
-            full_text=full_text
-        )
+    if is_detected(field_details["mrp"]["value"]):
+        # Normalize comma to dot
+        field_details["mrp"]["value"] = field_details["mrp"]["value"].replace(",", ".")
     print(f"[OCR] MRP Extracted: {field_details['mrp']['value']} (score: {field_details['mrp']['confidence']:.3f})", flush=True)
 
     # 5. License Number
