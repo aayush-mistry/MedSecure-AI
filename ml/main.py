@@ -14,6 +14,7 @@ from PIL import Image
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import easyocr
+from thefuzz import fuzz, process
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -173,9 +174,22 @@ def enhance_image(img):
 def prepare_ocr_image(img):
     ocr_img = resize_max_dimension(img, MAX_OCR_DIMENSION)
     gray = cv2.cvtColor(ocr_img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, 5, 35, 35)
+    
+    # 1. Bilateral Denoising (keeps edges sharp)
+    gray = cv2.bilateralFilter(gray, 9, 75, 75)
+    
+    # 2. CLAHE (Contrast Limited Adaptive Histogram Equalization)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    return clahe.apply(gray)
+    gray = clahe.apply(gray)
+    
+    # 3. Adaptive Thresholding to binarize image
+    binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    
+    # 4. Morphological Opening to remove small noise dots
+    kernel = np.ones((1, 1), np.uint8)
+    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    
+    return opened
 
 # --- Stage 3: OCR Extraction ---
 NOT_DETECTED = "Not Detected"
@@ -328,11 +342,15 @@ def extract_batch_number(ocr_results, full_text):
 def extract_ocr_fields(ocr_results):
     print("--- RAW OCR OUTPUT ---", flush=True)
     for res in ocr_results:
-        print(f"Text: '{res[1]}', Conf: {res[2]}", flush=True)
+        print(f"Text: '{res[1]}', Conf: {res[2]:.4f}", flush=True)
     print("----------------------", flush=True)
 
     lines = [r[1].strip() for r in ocr_results if len(r[1].strip()) >= 2]
     full_text = " ".join(lines)
+    
+    # Pre-clean full_text to remove common unhelpful OCR artifacts
+    cleaned_full_text = re.sub(r'[^A-Za-z0-9\s\.\,\:\/\-]', ' ', full_text)
+    
     field_details = {
         "name": field_result(),
         "manufacturer": field_result(),
@@ -347,37 +365,56 @@ def extract_ocr_fields(ocr_results):
         "barcode": field_result()
     }
 
-    # Extract specific fields first so we can exclude them from name candidates
-    field_details["batch_number"] = extract_batch_number(ocr_results, full_text)
-    print(f"[OCR] Batch Extracted: {field_details['batch_number']['value']} (score: {field_details['batch_number']['confidence']})", flush=True)
+    # 1. Batch Number (Robust logic: must have a prefix, or be highly structured)
+    batch_cand = extract_batch_number(ocr_results, full_text)
+    # If it extracted something but confidence is very low, and it's a common false positive (like 500MG), reject it.
+    if is_detected(batch_cand["value"]) and len(batch_cand["value"]) < 5 and batch_cand["confidence"] < 0.6:
+        batch_cand = field_result()
+    elif is_detected(batch_cand["value"]) and re.match(r'^\d{2,4}MG$', batch_cand["value"], re.IGNORECASE):
+        batch_cand = field_result()
+    field_details["batch_number"] = batch_cand
+    print(f"[OCR] Batch Extracted: {field_details['batch_number']['value']} (score: {field_details['batch_number']['confidence']:.3f})", flush=True)
 
+    # 2. Expiry Date
     field_details["expiry_date"] = best_regex_match(
         ocr_results,
-        r'(?:exp|expiry)(?:\s*date)?\s*[:;\-\.]*\s*((?:\d{1,2}|[OIlZz])(?:[/\-]|(?: \. ))(?:\d{2,4}))',
+        r'(?:exp|expiry|use before)(?:\s*date)?\s*[:;\-\.]*\s*((?:\d{1,2}|[OIlZz])(?:[/\-]|(?: \. ))(?:\d{2,4}))',
         normalizer=normalize_date,
         full_text=full_text
     )
-    print(f"[OCR] EXP Extracted: {field_details['expiry_date']['value']} (score: {field_details['expiry_date']['confidence']})", flush=True)
+    print(f"[OCR] EXP Extracted: {field_details['expiry_date']['value']} (score: {field_details['expiry_date']['confidence']:.3f})", flush=True)
 
+    # 3. Manufacturing Date
     field_details["mfg_date"] = best_regex_match(
         ocr_results,
         r'(?:mfg|mfd)(?:\s*date)?\s*[:;\-\.]*\s*((?:\d{1,2}|[OIlZz])(?:[/\-]|(?: \. ))(?:\d{2,4}))',
         normalizer=normalize_date,
         full_text=full_text
     )
-    print(f"[OCR] MFD Extracted: {field_details['mfg_date']['value']} (score: {field_details['mfg_date']['confidence']})", flush=True)
+    print(f"[OCR] MFD Extracted: {field_details['mfg_date']['value']} (score: {field_details['mfg_date']['confidence']:.3f})", flush=True)
 
+    # 4. MRP
     field_details["mrp"] = best_regex_match(
         ocr_results,
-        r'(?:mrp|price|max retail)\s*[:;\-]*\s*(?:rs\.?|inr|₹|r\$|r5)?\s*[:;\-]*\s*(\d+\.?\d*)',
+        r'(?:mrp|price|max retail)\s*[:;\-]*\s*(?:rs\.?|inr|₹|r\$|r5|e|€)?\s*[:;\-]*\s*(\d+\.\d{2})',
         full_text=full_text
     )
-    print(f"[OCR] MRP Extracted: {field_details['mrp']['value']} (score: {field_details['mrp']['confidence']})", flush=True)
+    if not is_detected(field_details["mrp"]["value"]):
+        # Fallback to integer MRP
+        field_details["mrp"] = best_regex_match(
+            ocr_results,
+            r'(?:mrp|price|max retail)\s*[:;\-]*\s*(?:rs\.?|inr|₹|r\$|r5|e|€)?\s*[:;\-]*\s*(\d+)',
+            full_text=full_text
+        )
+    print(f"[OCR] MRP Extracted: {field_details['mrp']['value']} (score: {field_details['mrp']['confidence']:.3f})", flush=True)
 
+    # 5. License Number
     field_details["license_number"] = best_regex_match(
         ocr_results,
         r'(?:mfg\.?\s*lic|lic\.?\s*no|license)\s*[:\-]*\s*([A-Z0-9/\-\.]{4,})'
     )
+    
+    # 6. Strength & Dosage
     field_details["strength"] = best_regex_match(
         ocr_results,
         r'\b(\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|iu))\b'
@@ -388,24 +425,29 @@ def extract_ocr_fields(ocr_results):
         group=0
     )
 
+    # 7. Manufacturer
+    best_mfr = field_result()
     for line in lines:
-        mfr = re.search(r'(?:m[i1l]?fg\.?\s*by|manufactured\s*by|manufacturer|marketed\s*by|mktd\s*by)\s*[:\-]*\s*(.+)', line, re.IGNORECASE)
-        if mfr and mfr.group(1).strip():
-            manufacturer = re.split(r'\b(?:batch|exp|expiry|mrp|m[i1l]?fg\s*date|for\s*test)\b', mfr.group(1), flags=re.IGNORECASE)[0].strip()
-            if manufacturer:
-                field_details["manufacturer"] = field_result(manufacturer[:80], confidence_for_value(ocr_results, line))
+        mfr_match = re.search(r'(?:m[i1l]?fg\.?\s*by|manufactured\s*by|manufacturer|marketed\s*by|mktd\s*by)\s*[:\-]*\s*(.+)', line, re.IGNORECASE)
+        if mfr_match and mfr_match.group(1).strip():
+            manufacturer_text = re.split(r'\b(?:batch|exp|expiry|mrp|m[i1l]?fg\s*date|for\s*test)\b', mfr_match.group(1), flags=re.IGNORECASE)[0].strip()
+            if len(manufacturer_text) > 3:
+                best_mfr = field_result(manufacturer_text[:80], confidence_for_value(ocr_results, line))
                 break
-    if not is_detected(field_details["manufacturer"]["value"]):
-        mfr = re.search(r'(?:m[i1l]?fg\.?\s*by|manufactured\s*by|manufacturer|marketed\s*by|mktd\s*by)\s*[:\-]*\s*(.+?)(?=\s+(?:batch|exp|expiry|mrp|m[i1l]?fg\s*date|for\s*test)\b|$)', full_text, re.IGNORECASE)
-        if mfr:
-            manufacturer = mfr.group(1).strip()
-            field_details["manufacturer"] = field_result(manufacturer[:80], confidence_for_value(ocr_results, manufacturer))
+    
+    if not is_detected(best_mfr["value"]):
+        mfr_match = re.search(r'(?:m[i1l]?fg\.?\s*by|manufactured\s*by|manufacturer|marketed\s*by|mktd\s*by)\s*[:\-]*\s*(.+?)(?=\s+(?:batch|exp|expiry|mrp|m[i1l]?fg\s*date|for\s*test)\b|$)', full_text, re.IGNORECASE)
+        if mfr_match:
+            manufacturer_text = mfr_match.group(1).strip()
+            if len(manufacturer_text) > 3:
+                best_mfr = field_result(manufacturer_text[:80], confidence_for_value(ocr_results, manufacturer_text))
+    field_details["manufacturer"] = best_mfr
 
-    # Identify medicine name candidate using height * confidence
+    # 8. Medicine Name Candidate Selection
     ignored_name_exact = {
         "mfg", "mfd", "batch", "exp", "expiry", "mrp", "price", "batch no", "mfg date", "exp date",
         "license", "schedule", "keep out of reach", "store in", "cool", "dry", "place", "protect from",
-        "dosage", "directed by", "physician", "warning", "caution", "retail", "inclusive", "gsk", "pfizer", "abbott"
+        "dosage", "directed by", "physician", "warning", "caution", "retail", "inclusive", "gsk", "pfizer", "abbott", "for", "relief", "pain", "fever", "each", "tablet", "contains", "film-coated"
     }
     
     extracted_values = [v["value"].lower() for k, v in field_details.items() if v and is_detected(v["value"])]
@@ -416,7 +458,6 @@ def extract_ocr_fields(ocr_results):
         text = result[1].strip() if len(result) >= 2 else ""
         conf = float(result[2]) if len(result) >= 3 else 0.0
         
-        # Calculate bounding box height
         try:
             height = box[2][1] - box[0][1]
         except:
@@ -424,25 +465,31 @@ def extract_ocr_fields(ocr_results):
             
         lower = text.lower()
         
-        # Filter out text that exactly matches our ignored list or is already extracted as a field (like batch number)
+        # Remove trailing/leading punctuation
+        lower = re.sub(r'^[^\w]+|[^\w]+$', '', lower)
+        
+        # Skip if exact match with ignored keywords
         if lower in ignored_name_exact or any(lower == ev for ev in extracted_values):
             continue
             
-        # Filter out purely non-alpha strings (e.g. "07/2027", "16.65")
+        # Must have letters
         if not any(ch.isalpha() for ch in lower):
             continue
             
         if len(lower) < 3 or conf < 0.2:
             continue
             
+        # Prioritize larger text (height) and high confidence
         score = conf * height
         name_candidates.append((text, score, conf))
     
     if name_candidates:
         name_candidates.sort(key=lambda x: x[1], reverse=True)
+        # Select the highest scoring text block as the main candidate
         best_cand = name_candidates[0]
-        best_name = field_result(clean_medicine_name_candidate(best_cand[0]), best_cand[2])
-        print(f"[OCR] Best Name Candidate: {best_name['value']} (score: {best_cand[1]:.2f})", flush=True)
+        cleaned_cand = clean_medicine_name_candidate(best_cand[0])
+        best_name = field_result(cleaned_cand, best_cand[2])
+        print(f"[OCR] Best Name Candidate: {best_name['value']} (score: {best_cand[1]:.2f}, conf: {best_cand[2]:.3f})", flush=True)
     else:
         best_name = field_result()
         print("[OCR] No valid name candidate found.", flush=True)
@@ -519,37 +566,56 @@ def medicine_manufacturer(med):
 
 def build_medicine_candidates(full_text, lines, conn):
     init_db_cache()
-    tokens = []
-    for token in re.findall(r"[A-Za-z][A-Za-z0-9\-]{2,}", full_text):
-        token = token.strip().lower()
-        if len(token) >= 4 and token not in {"batch", "expiry", "mfg", "mfd", "tablet", "capsule", "tablets", "capsules", "price", "license"}:
-            tokens.append(token)
-
-    seen = set()
+    # Find all words with length >= 4
+    tokens = [t.strip().lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", full_text)]
+    ignored_candidate_terms = {"store", "keep", "reach", "children", "dosage", "directed", "physician", "mfd", "mfg", "exp", "mrp", "batch", "tablet", "capsule", "syrup"}
+    
+    tokens = [t for t in tokens if t not in ignored_candidate_terms]
+    
     candidates = []
-    searchable_columns = ["brand_name", "name", "generic_name", "primary_ingredient", "manufacturer_name"]
+    seen = set()
     
-    ignored_candidate_terms = {"store", "keep", "reach", "children", "dosage", "directed", "physician", "mfd", "mfg", "exp", "mrp", "batch"}
-    
+    # We will build candidates based on fuzzy matching tokens against brand_name and generic_name
+    search_corpus = []
+    for med in _DB_CACHE["medicines"]:
+        search_corpus.append((med.get("id"), str(med.get("brand_name", "")).lower()))
+        search_corpus.append((med.get("id"), str(med.get("generic_name", "")).lower()))
+        
     for token in tokens:
-        if token in ignored_candidate_terms or len(token) < 4: continue
-        for med in _DB_CACHE["medicines"]:
-            if med.get("id") in seen: continue
-            for col in searchable_columns:
-                val = med.get(col)
-                if val and token in str(val).lower():
-                    seen.add(med.get("id"))
-                    candidates.append(med)
-                    break
+        # Get top matches for each token
+        matches = process.extract(token, [c[1] for c in search_corpus], limit=3, scorer=fuzz.ratio)
+        for match_text, score in matches:
+            if score >= 75:  # Good fuzzy match threshold
+                # Find the med_id
+                for c in search_corpus:
+                    if c[1] == match_text and c[0] not in seen:
+                        seen.add(c[0])
+                        # fetch med object
+                        for m in _DB_CACHE["medicines"]:
+                            if m.get("id") == c[0]:
+                                candidates.append(m)
+                                break
         if len(candidates) >= 150:
             break
+            
+    # Also blindly add all meds whose exact brand name or generic name appears directly in the full text
+    full_lower = full_text.lower()
+    for med in _DB_CACHE["medicines"]:
+        if med.get("id") not in seen:
+            brand = str(med.get("brand_name", "")).lower()
+            generic = str(med.get("generic_name", "")).lower()
+            if (len(brand) >= 4 and brand in full_lower) or (len(generic) >= 4 and generic in full_lower):
+                seen.add(med.get("id"))
+                candidates.append(med)
+                
     return candidates
 
 def find_medicine_by_batch(batch_number, conn):
     if not is_detected(batch_number): return None
     init_db_cache()
+    batch_str = str(batch_number).lower().strip()
     for b in _DB_CACHE["batches"]:
-        if str(b.get("batch_number")).lower() == str(batch_number).lower():
+        if str(b.get("batch_number")).lower().strip() == batch_str:
             for m in _DB_CACHE["medicines"]:
                 if str(m.get("id")).lower() == str(b.get("medicine_id")).lower():
                     return m
@@ -560,71 +626,94 @@ def verify_db_medicine(fields, full_text, lines, conn):
     if not _DB_CACHE["medicines"]:
         return None, 0.0, {"status": "skipped", "reason": "Medicine database unavailable"}
 
+    # 1. Check if Batch Number directly resolves a medicine
     batch_med = find_medicine_by_batch(fields.get("batch_number"), conn)
     if batch_med:
-        return batch_med, 0.93, {
+        print(f"[DB VERIFICATION] Found via Batch Number: {medicine_name(batch_med)}", flush=True)
+        return batch_med, 0.95, {
             "status": "verified",
-            "reason": "Medicine identified from registered batch number"
+            "reason": "Medicine explicitly identified from registered batch number"
         }
 
+    # 2. Build candidates based on Fuzzy Matching OCR Text
     all_meds = build_medicine_candidates(full_text, lines, conn)
     if not all_meds:
-        print("[DB VERIFICATION] No medicine candidates found from OCR text.", flush=True)
+        print("[DB VERIFICATION] No medicine candidates found using Fuzzy logic.", flush=True)
         return None, 0.0, {
             "status": "not_found",
-            "reason": "Medicine Not Found: No matching tokens in database"
+            "reason": "Medicine Not Found: OCR tokens do not closely match any database record"
         }
     
     best_med = None
     best_score = 0.0
+    
+    name_extracted = fields.get("name")
+    mfr_extracted = fields.get("manufacturer")
+    
+    name_norm = normalize_match_text(name_extracted) if is_detected(name_extracted) else ""
     full_text_norm = normalize_match_text(full_text)
-    name_norm = normalize_match_text(fields.get("name"))
-    manufacturer_norm = normalize_match_text(fields.get("manufacturer"))
 
+    # 3. Score all candidates using TheFuzz
     for med in all_meds:
         brand_norm = normalize_match_text(medicine_name(med))
         generic_norm = normalize_match_text(med.get("generic_name") or "")
-        med_mfr_norm = normalize_match_text(medicine_manufacturer(med))
+        
         if not brand_norm:
             continue
 
         scores = []
+        
+        # Match primary OCR name candidate vs Database Brand Name
         if name_norm:
-            scores.append(difflib.SequenceMatcher(None, name_norm, brand_norm).ratio())
-            if name_norm == brand_norm:
-                scores.append(1.0)
-            elif brand_norm in name_norm or name_norm in brand_norm:
-                scores.append(0.94)
+            scores.append(fuzz.ratio(name_norm, brand_norm) / 100.0)
+            scores.append(fuzz.partial_ratio(brand_norm, name_norm) / 100.0)
+            
+        # Match full text vs Database Brand Name
         if brand_norm in full_text_norm:
             scores.append(0.96)
+        else:
+            scores.append(fuzz.partial_ratio(brand_norm, full_text_norm) / 100.0)
+            
+        # Match lines vs Database Brand Name
         for line in lines:
             line_norm = normalize_match_text(line)
             if line_norm:
-                scores.append(difflib.SequenceMatcher(None, line_norm, brand_norm).ratio())
+                scores.append(fuzz.ratio(line_norm, brand_norm) / 100.0)
 
-        score = max(scores) if scores else 0.0
+        base_score = max(scores) if scores else 0.0
+        
+        # Boosts
         if generic_norm and generic_norm in full_text_norm:
-            score = min(1.0, score + 0.03)
-        if manufacturer_norm and med_mfr_norm:
-            mfr_score = difflib.SequenceMatcher(None, manufacturer_norm, med_mfr_norm).ratio()
-            if mfr_score >= 0.70 or manufacturer_norm in med_mfr_norm or med_mfr_norm in manufacturer_norm:
-                score = min(1.0, score + 0.04)
-
-        if score > best_score:
-            best_score = score
+            base_score = min(1.0, base_score + 0.10)
+            
+        if is_detected(mfr_extracted):
+            db_mfr = normalize_match_text(medicine_manufacturer(med))
+            mfr_extracted_norm = normalize_match_text(mfr_extracted)
+            if db_mfr and mfr_extracted_norm:
+                mfr_fuzz = fuzz.partial_ratio(db_mfr, mfr_extracted_norm) / 100.0
+                if mfr_fuzz > 0.8:
+                    base_score = min(1.0, base_score + 0.15)
+                    
+        # Apply strict confidence limit.
+        # If the highest match is Prelief (fuzz score maybe 70), we should reject it.
+        # We need a robust threshold.
+        if base_score > best_score:
+            best_score = base_score
             best_med = med
 
-    if not best_med or best_score < MEDICINE_MATCH_THRESHOLD:
-        print(f"[DB VERIFICATION] Best match failed threshold ({best_score} < {MEDICINE_MATCH_THRESHOLD})", flush=True)
+    # 4. Strict Threshold Evaluation
+    MEDICINE_FUZZY_THRESHOLD = 0.85
+    if not best_med or best_score < MEDICINE_FUZZY_THRESHOLD:
+        print(f"[DB VERIFICATION] Best match failed threshold ({best_score:.3f} < {MEDICINE_FUZZY_THRESHOLD})", flush=True)
         return None, best_score, {
             "status": "not_found",
-            "reason": "Medicine Not Found: OCR evidence did not meet confidence threshold"
+            "reason": f"Medicine Not Found: Highest candidate score ({best_score:.2f}) did not meet confidence threshold"
         }
 
-    print(f"[DB VERIFICATION] Matched: {medicine_name(best_med)} with score {best_score}", flush=True)
+    print(f"[DB VERIFICATION] Matched: {medicine_name(best_med)} with robust score {best_score:.3f}", flush=True)
     return best_med, best_score, {
         "status": "verified",
-        "reason": f"Medicine matched with {round(best_score * 100)}% confidence"
+        "reason": f"Medicine matched using fuzzy matching with {round(best_score * 100)}% confidence"
     }
 
 # --- Stage 5: Batch Verification ---
@@ -846,7 +935,7 @@ def verify_barcode(img, batch_row, med_row):
             decoder_name = "OCR barcode digit fallback"
 
     if not decoded:
-        note = f"Barcode not detected by {decoder_name}"
+        note = "Barcode not found on packaging"
         return {"status": "skipped", "required": req, "found": False, "match": None, "ocr_value": NOT_DETECTED, "stored_value": None, "note": note, "reason": "Barcode not detected; verification skipped", "score": 85 if not req else 70}
     
     expected = (batch_row.get("barcode_value") or "") if batch_row else ""
@@ -914,13 +1003,17 @@ def db_value(row, *keys):
             return str(value)
     return None
 
-def compare_values(ocr_value, db_value_text, label=None):
+def compare_values(ocr_field, db_value_text, label=None):
+    ocr_value = ocr_field.get("value", NOT_DETECTED) if isinstance(ocr_field, dict) else ocr_field
+    ocr_conf = ocr_field.get("confidence", 0.0) if isinstance(ocr_field, dict) else 0.0
+    
     if not is_detected(ocr_value):
         return {
             "extracted": NOT_DETECTED,
             "stored": db_value_text or None,
             "match": None,
             "status": "Skipped",
+            "ocr_confidence": 0.0,
             "note": f"{label or 'Field'} not detected by OCR"
         }
     if not db_value_text:
@@ -929,6 +1022,7 @@ def compare_values(ocr_value, db_value_text, label=None):
             "stored": None,
             "match": None,
             "status": "No Database Record",
+            "ocr_confidence": ocr_conf,
             "note": "No reference value available for comparison"
         }
     ocr_norm = normalize_match_text(normalize_date(ocr_value))
@@ -939,16 +1033,21 @@ def compare_values(ocr_value, db_value_text, label=None):
         "stored": db_value_text,
         "match": match,
         "status": "Verified" if match else "Mismatch",
+        "ocr_confidence": ocr_conf,
         "note": None if match else "OCR value differs from database reference"
     }
 
-def compare_fuzzy(ocr_value, db_value_text, label=None, threshold=0.75):
+def compare_fuzzy(ocr_field, db_value_text, label=None, threshold=0.75):
+    ocr_value = ocr_field.get("value", NOT_DETECTED) if isinstance(ocr_field, dict) else ocr_field
+    ocr_conf = ocr_field.get("confidence", 0.0) if isinstance(ocr_field, dict) else 0.0
+    
     if not is_detected(ocr_value):
         return {
             "extracted": NOT_DETECTED,
             "stored": db_value_text or None,
             "match": None,
             "status": "Skipped",
+            "ocr_confidence": 0.0,
             "note": f"{label or 'Field'} not detected by OCR"
         }
     if not db_value_text:
@@ -957,11 +1056,14 @@ def compare_fuzzy(ocr_value, db_value_text, label=None, threshold=0.75):
             "stored": None,
             "match": None,
             "status": "No Database Record",
+            "ocr_confidence": ocr_conf,
             "note": "No reference value available for comparison"
         }
     ocr_norm = normalize_match_text(ocr_value)
     db_norm = normalize_match_text(db_value_text)
-    ratio = difflib.SequenceMatcher(None, ocr_norm, db_norm).ratio()
+    
+    # Use thefuzz for fuzzy matching
+    ratio = fuzz.ratio(ocr_norm, db_norm) / 100.0
     match = ratio >= threshold or ocr_norm in db_norm or db_norm in ocr_norm
     return {
         "extracted": ocr_value,
@@ -969,6 +1071,7 @@ def compare_fuzzy(ocr_value, db_value_text, label=None, threshold=0.75):
         "match": match,
         "status": "Verified" if match else "Mismatch",
         "confidence": round(ratio, 3),
+        "ocr_confidence": ocr_conf,
         "note": None if match else "OCR value differs from database reference"
     }
 
@@ -994,8 +1097,8 @@ def build_verification_results(fields, med_row, batch_row, barcode_status):
         dosage_res = {
             "extracted": NOT_DETECTED,
             "stored": dosage_stored,
-            "match": False if dosage_stored else None,
-            "status": "Mismatch" if dosage_stored else "Skipped",
+            "match": None,
+            "status": "Skipped",
             "note": "Dosage form not found in OCR text." if dosage_stored else "No dosage form in database."
         }
 
@@ -1010,8 +1113,8 @@ def build_verification_results(fields, med_row, batch_row, barcode_status):
         gn_res = {
             "extracted": NOT_DETECTED,
             "stored": gn_db,
-            "match": False if gn_db else None,
-            "status": "Mismatch" if gn_db else "Skipped",
+            "match": None,
+            "status": "Skipped",
             "note": "Generic name not found in OCR text." if gn_db else "No generic name in database."
         }
 
@@ -1038,6 +1141,37 @@ def build_verification_results(fields, med_row, batch_row, barcode_status):
     }
 
 def generate_evidence_report(stages_results, verification_results=None):
+    if verification_results:
+        # 1. Audit Verification Results for Insufficient Data
+        critical_fields = {"medicine_name", "manufacturer", "batch_number", "manufacturing_date", "expiry_date", "mrp", "license_number"}
+        
+        # Determine if key identification fields were detected
+        med_name_status = verification_results.get("medicine_name", {}).get("status", "Skipped")
+        mfr_status = verification_results.get("manufacturer", {}).get("status", "Skipped")
+        
+        detected_count = sum(1 for f in critical_fields if verification_results.get(f, {}).get("status") != "Skipped")
+        
+        # Abort scoring if we don't even have a medicine name, manufacturer, OR we lack 60% of critical fields.
+        if med_name_status == "Skipped" and mfr_status == "Skipped":
+            print("[SCORING ABORTED] Medicine Name and Manufacturer not detected.", flush=True)
+            return {
+                "score": None,
+                "confidence": "N/A",
+                "verdict": "Insufficient Data",
+                "explanation": ["Image quality is insufficient for reliable verification. Please upload a clearer image."],
+                "breakdown": {}
+            }
+        
+        if detected_count < 3: # Need at least 3 critical fields to score
+            print(f"[SCORING ABORTED] Too few critical fields detected ({detected_count}/7).", flush=True)
+            return {
+                "score": None,
+                "confidence": "N/A",
+                "verdict": "Insufficient Data",
+                "explanation": ["Image quality is insufficient for reliable verification. Please upload a clearer image."],
+                "breakdown": {}
+            }
+
     score = 0
     weights = {
         "ocr": 0.12, "db": 0.18, "batch": 0.18, "barcode": 0.08,
@@ -1057,8 +1191,6 @@ def generate_evidence_report(stages_results, verification_results=None):
     if verification_results:
         mismatches = []
         missing_db = []
-        skipped_critical = []
-        critical_fields = {"batch_number", "manufacturing_date", "expiry_date", "mrp", "barcode", "license_number"}
 
         for field_name, field_res in verification_results.items():
             if isinstance(field_res, dict):
@@ -1067,25 +1199,20 @@ def generate_evidence_report(stages_results, verification_results=None):
                     mismatches.append(field_name)
                 elif status == "No Database Record":
                     missing_db.append(field_name)
-                elif status == "Skipped" and field_name in critical_fields:
-                    if field_res.get("required") is False:
-                        continue
-                    skipped_critical.append(field_name)
         
         if mismatches:
             # Special case for MRP: price changes are common, lower penalty
             mrp_only = (mismatches == ["mrp"])
             penalty = len(mismatches) * 5 if mrp_only else len(mismatches) * 15
             score -= penalty
+            print(f"[SCORING] Mismatches detected: {', '.join(mismatches)}. Applying penalty: -{penalty}", flush=True)
             explanation.append(f"FAIL: Penalty (-{penalty}) applied for mismatches in: {', '.join(mismatches)}")
             
         if missing_db:
+            print(f"[SCORING] Missing DB records for: {', '.join(missing_db)}", flush=True)
             explanation.append(f"WARN: Database is missing records for: {', '.join(missing_db)} (No penalty applied)")
 
-        if skipped_critical:
-            penalty = len(skipped_critical) * 5
-            score -= penalty
-            explanation.append(f"WARN: Penalty (-{penalty}) applied for skipped critical fields: {', '.join(skipped_critical)}")
+        # (Penalty for Skipped Critical Fields removed by design to prevent false Counterfeit flags on bad images)
 
     final_score = min(100, max(0, round(score, 1)))
     return {
