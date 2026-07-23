@@ -703,12 +703,23 @@ def decode_barcodes_opencv(gray):
 def decode_barcodes_zxing(img):
     if not HAS_ZXING:
         return []
-    results = zxingcpp.read_barcodes(img)
+        
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    
+    variations = [img, gray, thresh]
     decoded = []
-    for result in results:
-        text = getattr(result, "text", None)
-        if text:
-            decoded.append(text)
+    
+    for v in variations:
+        try:
+            results = zxingcpp.read_barcodes(v)
+            for result in results:
+                text = getattr(result, "text", None)
+                if text and text not in decoded:
+                    decoded.append(text)
+        except Exception:
+            continue
+            
     return decoded
 
 def valid_ean13(value):
@@ -1062,19 +1073,19 @@ def generate_evidence_report(stages_results, verification_results=None):
                     skipped_critical.append(field_name)
         
         if mismatches:
-            penalty = len(mismatches) * 15
+            # Special case for MRP: price changes are common, lower penalty
+            mrp_only = (mismatches == ["mrp"])
+            penalty = len(mismatches) * 5 if mrp_only else len(mismatches) * 15
             score -= penalty
             explanation.append(f"FAIL: Penalty (-{penalty}) applied for mismatches in: {', '.join(mismatches)}")
             
         if missing_db:
-            penalty = len(missing_db) * 10
-            score -= penalty
-            explanation.append(f"FAIL: Penalty (-{penalty}) applied for unverified fields (No DB Record): {', '.join(missing_db)}")
+            explanation.append(f"WARN: Database is missing records for: {', '.join(missing_db)} (No penalty applied)")
 
         if skipped_critical:
-            penalty = len(skipped_critical) * 10
+            penalty = len(skipped_critical) * 5
             score -= penalty
-            explanation.append(f"FAIL: Penalty (-{penalty}) applied for missing critical fields on packaging: {', '.join(skipped_critical)}")
+            explanation.append(f"WARN: Penalty (-{penalty}) applied for skipped critical fields: {', '.join(skipped_critical)}")
 
     final_score = min(100, max(0, round(score, 1)))
     return {
